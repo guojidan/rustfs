@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod data_scanner;
-pub mod data_usage;
-pub mod histogram;
-pub mod metrics;
+pub mod event;
+pub mod manager;
+pub mod progress;
+pub mod storage;
+pub mod task;
 
-// Re-export main types for convenience
-pub use data_scanner::Scanner;
-pub use data_usage::{DataUsageInfo, BucketUsageInfo, BucketTargetUsageInfo, load_data_usage_from_backend, store_data_usage_in_backend};
-pub use metrics::ScannerMetrics;
+pub use manager::HealManager;
+pub use task::{HealOptions, HealPriority, HealRequest, HealTask, HealType}; 

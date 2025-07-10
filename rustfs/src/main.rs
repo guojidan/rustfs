@@ -453,7 +453,7 @@ async fn run(opt: config::Opt) -> Result<()> {
     // init_data_scanner().await;
     // init_auto_heal().await;
     let _ = create_ahm_services_cancel_token();
-    let scanner = Scanner::new(Some(ScannerConfig::default()));
+    let scanner = Scanner::new(Some(ScannerConfig::default()), None);
     scanner.start().await?;
 
     // init console configuration
