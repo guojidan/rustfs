@@ -19,5 +19,7 @@ pub mod metrics;
 
 // Re-export main types for convenience
 pub use data_scanner::Scanner;
-pub use data_usage::{DataUsageInfo, BucketUsageInfo, BucketTargetUsageInfo, load_data_usage_from_backend, store_data_usage_in_backend};
+pub use data_usage::{
+    load_data_usage_from_backend, store_data_usage_in_backend, BucketTargetUsageInfo, BucketUsageInfo, DataUsageInfo,
+};
 pub use metrics::ScannerMetrics;
