@@ -26,7 +26,6 @@ use crate::erasure_coding;
 use crate::erasure_coding::bitrot_verify;
 use crate::error::ObjectApiError;
 use crate::error::{Error, Result};
-use crate::global::GLOBAL_MRFState;
 use crate::global::{GLOBAL_LocalNodeName, GLOBAL_TierConfigMgr};
 use crate::heal::data_usage_cache::DataUsageCache;
 use crate::heal::heal_ops::{HealEntryFn, HealSequence};
@@ -1855,17 +1854,23 @@ impl SetDisks {
 
         let fi = Self::pick_valid_fileinfo(&parts_metadata, mot_time, etag, read_quorum as usize)?;
         if errs.iter().any(|err| err.is_some()) {
-            GLOBAL_MRFState
-                .add_partial(PartialOperation {
-                    bucket: fi.volume.to_string(),
-                    object: fi.name.to_string(),
-                    queued: Utc::now(),
-                    version_id: fi.version_id.map(|v| v.to_string()),
-                    set_index: self.set_index,
-                    pool_index: self.pool_index,
-                    ..Default::default()
-                })
-                .await;
+            let _ = rustfs_common::heal_channel::send_heal_request(
+                rustfs_common::heal_channel::create_heal_request_with_options(
+                    fi.volume.to_string(),                        // bucket
+                    Some(fi.name.to_string()),                    // object_prefix
+                    false,                                        // force_start
+                    Some(rustfs_common::heal_channel::HealChannelPriority::Normal), // priority
+                    Some(self.pool_index),                        // pool_index
+                    Some(self.set_index),                         // set_index
+                    None,                                         // scan_mode
+                    None,                                         // remove_corrupted
+                    None,                                         // recreate_missing
+                    None,                                         // update_parity
+                    None,                                         // recursive
+                    None,                                         // dry_run
+                    None,                                         // timeout_seconds
+                )
+            ).await;
         }
         // debug!("get_object_fileinfo pick fi {:?}", &fi);
 
@@ -1994,18 +1999,23 @@ impl SetDisks {
                     match de_err {
                         DiskError::FileNotFound | DiskError::FileCorrupt => {
                             error!("erasure.decode err 111 {:?}", &de_err);
-                            GLOBAL_MRFState
-                                .add_partial(PartialOperation {
-                                    bucket: bucket.to_string(),
-                                    object: object.to_string(),
-                                    queued: Utc::now(),
-                                    version_id: fi.version_id.map(|v| v.to_string()),
-                                    set_index,
-                                    pool_index,
-                                    bitrot_scan: de_err == DiskError::FileCorrupt,
-                                    ..Default::default()
-                                })
-                                .await;
+                            let _ = rustfs_common::heal_channel::send_heal_request(
+                                rustfs_common::heal_channel::create_heal_request_with_options(
+                                    bucket.to_string(),
+                                    Some(object.to_string()),
+                                    false,
+                                    Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
+                                    Some(pool_index),
+                                    Some(set_index),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                            ).await;
                             has_err = false;
                         }
                         _ => {}
@@ -4524,17 +4534,23 @@ impl StorageAPI for SetDisks {
 
     #[tracing::instrument(skip(self))]
     async fn add_partial(&self, bucket: &str, object: &str, version_id: &str) -> Result<()> {
-        GLOBAL_MRFState
-            .add_partial(PartialOperation {
-                bucket: bucket.to_string(),
-                object: object.to_string(),
-                version_id: Some(version_id.to_string()),
-                queued: Utc::now(),
-                set_index: self.set_index,
-                pool_index: self.pool_index,
-                ..Default::default()
-            })
-            .await;
+        let _ = rustfs_common::heal_channel::send_heal_request(
+            rustfs_common::heal_channel::create_heal_request_with_options(
+                bucket.to_string(),
+                Some(object.to_string()),
+                false,
+                Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
+                Some(self.pool_index),
+                Some(self.set_index),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        ).await;
         Ok(())
     }
 
@@ -5577,17 +5593,23 @@ impl StorageAPI for SetDisks {
                 .await?;
         }
         if let Some(versions) = versions {
-            GLOBAL_MRFState
-                .add_partial(PartialOperation {
-                    bucket: bucket.to_string(),
-                    object: object.to_string(),
-                    queued: Utc::now(),
-                    versions,
-                    set_index: self.set_index,
-                    pool_index: self.pool_index,
-                    ..Default::default()
-                })
-                .await;
+            let _ = rustfs_common::heal_channel::send_heal_request(
+                rustfs_common::heal_channel::create_heal_request_with_options(
+                    bucket.to_string(),
+                    Some(object.to_string()),
+                    false,
+                    Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
+                    Some(self.pool_index),
+                    Some(self.set_index),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ).await;
         }
 
         let upload_id_path = upload_id_path.clone();
