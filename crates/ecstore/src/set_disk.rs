@@ -1854,23 +1854,16 @@ impl SetDisks {
 
         let fi = Self::pick_valid_fileinfo(&parts_metadata, mot_time, etag, read_quorum as usize)?;
         if errs.iter().any(|err| err.is_some()) {
-            let _ = rustfs_common::heal_channel::send_heal_request(
-                rustfs_common::heal_channel::create_heal_request_with_options(
-                    fi.volume.to_string(),                        // bucket
-                    Some(fi.name.to_string()),                    // object_prefix
-                    false,                                        // force_start
+            let _ =
+                rustfs_common::heal_channel::send_heal_request(rustfs_common::heal_channel::create_heal_request_with_options(
+                    fi.volume.to_string(),                                          // bucket
+                    Some(fi.name.to_string()),                                      // object_prefix
+                    false,                                                          // force_start
                     Some(rustfs_common::heal_channel::HealChannelPriority::Normal), // priority
-                    Some(self.pool_index),                        // pool_index
-                    Some(self.set_index),                         // set_index
-                    None,                                         // scan_mode
-                    None,                                         // remove_corrupted
-                    None,                                         // recreate_missing
-                    None,                                         // update_parity
-                    None,                                         // recursive
-                    None,                                         // dry_run
-                    None,                                         // timeout_seconds
-                )
-            ).await;
+                    Some(self.pool_index),                                          // pool_index
+                    Some(self.set_index),                                           // set_index
+                ))
+                .await;
         }
         // debug!("get_object_fileinfo pick fi {:?}", &fi);
 
@@ -2007,15 +2000,9 @@ impl SetDisks {
                                     Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
                                     Some(pool_index),
                                     Some(set_index),
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                )
-                            ).await;
+                                ),
+                            )
+                            .await;
                             has_err = false;
                         }
                         _ => {}
@@ -2133,7 +2120,7 @@ impl SetDisks {
                     Some(filter_prefix.to_string())
                 }
             },
-            recursice: true,
+            recursive: true,
             forward_to: None,
             min_disks: 1,
             report_not_found: false,
@@ -2182,7 +2169,7 @@ impl SetDisks {
             finished: None,
         };
 
-        _ = list_path_raw(rx, lopts)
+        _ = list_path_raw(lopts)
             .await
             .map_err(|err| Error::other(format!("listPathRaw returned {err}: bucket: {bucket}, path: {path}")));
         Ok(())
@@ -3652,63 +3639,59 @@ impl SetDisks {
                 bucket: bucket.clone(),
                 ..Default::default()
             };
-            let (_, rx) = broadcast::channel(1);
             let jt_agree = jt.clone();
             let jt_partial = jt.clone();
             let bucket_agree = bucket.clone();
             let bucket_partial = bucket.clone();
             let heal_entry_agree = heal_entry.clone();
             let heal_entry_partial = heal_entry.clone();
-            if let Err(err) = list_path_raw(
-                rx,
-                ListPathRawOptions {
-                    disks,
-                    fallback_disks,
-                    bucket: bucket.clone(),
-                    recursice: true,
-                    forward_to,
-                    min_disks: 1,
-                    report_not_found: false,
-                    agreed: Some(Box::new(move |entry: MetaCacheEntry| {
-                        let jt = jt_agree.clone();
-                        let bucket = bucket_agree.clone();
-                        let heal_entry = heal_entry_agree.clone();
-                        Box::pin(async move {
+            if let Err(err) = list_path_raw(ListPathRawOptions {
+                disks,
+                fallback_disks,
+                bucket: bucket.clone(),
+                recursive: true,
+                forward_to,
+                min_disks: 1,
+                report_not_found: false,
+                agreed: Some(Box::new(move |entry: MetaCacheEntry| {
+                    let jt = jt_agree.clone();
+                    let bucket = bucket_agree.clone();
+                    let heal_entry = heal_entry_agree.clone();
+                    Box::pin(async move {
+                        jt.take().await;
+                        let bucket = bucket.clone();
+                        tokio::spawn(async move {
+                            heal_entry(bucket, entry).await;
+                        });
+                    })
+                })),
+                partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
+                    let jt = jt_partial.clone();
+                    let bucket = bucket_partial.clone();
+                    let heal_entry = heal_entry_partial.clone();
+                    Box::pin({
+                        let heal_entry = heal_entry.clone();
+                        let resolver = resolver.clone();
+                        async move {
+                            let entry = if let Some(entry) = entries.resolve(resolver) {
+                                entry
+                            } else if let (Some(entry), _) = entries.first_found() {
+                                entry
+                            } else {
+                                return;
+                            };
                             jt.take().await;
                             let bucket = bucket.clone();
+                            let heal_entry = heal_entry.clone();
                             tokio::spawn(async move {
                                 heal_entry(bucket, entry).await;
                             });
-                        })
-                    })),
-                    partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
-                        let jt = jt_partial.clone();
-                        let bucket = bucket_partial.clone();
-                        let heal_entry = heal_entry_partial.clone();
-                        Box::pin({
-                            let heal_entry = heal_entry.clone();
-                            let resolver = resolver.clone();
-                            async move {
-                                let entry = if let Some(entry) = entries.resolve(resolver) {
-                                    entry
-                                } else if let (Some(entry), _) = entries.first_found() {
-                                    entry
-                                } else {
-                                    return;
-                                };
-                                jt.take().await;
-                                let bucket = bucket.clone();
-                                let heal_entry = heal_entry.clone();
-                                tokio::spawn(async move {
-                                    heal_entry(bucket, entry).await;
-                                });
-                            }
-                        })
-                    })),
-                    finished: None,
-                    ..Default::default()
-                },
-            )
+                        }
+                    })
+                })),
+                finished: None,
+                ..Default::default()
+            })
             .await
             {
                 ret_err = Some(err.into());
@@ -4534,23 +4517,15 @@ impl StorageAPI for SetDisks {
 
     #[tracing::instrument(skip(self))]
     async fn add_partial(&self, bucket: &str, object: &str, version_id: &str) -> Result<()> {
-        let _ = rustfs_common::heal_channel::send_heal_request(
-            rustfs_common::heal_channel::create_heal_request_with_options(
-                bucket.to_string(),
-                Some(object.to_string()),
-                false,
-                Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
-                Some(self.pool_index),
-                Some(self.set_index),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        ).await;
+        let _ = rustfs_common::heal_channel::send_heal_request(rustfs_common::heal_channel::create_heal_request_with_options(
+            bucket.to_string(),
+            Some(object.to_string()),
+            false,
+            Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
+            Some(self.pool_index),
+            Some(self.set_index),
+        ))
+        .await;
         Ok(())
     }
 
@@ -5593,23 +5568,16 @@ impl StorageAPI for SetDisks {
                 .await?;
         }
         if let Some(versions) = versions {
-            let _ = rustfs_common::heal_channel::send_heal_request(
-                rustfs_common::heal_channel::create_heal_request_with_options(
+            let _ =
+                rustfs_common::heal_channel::send_heal_request(rustfs_common::heal_channel::create_heal_request_with_options(
                     bucket.to_string(),
                     Some(object.to_string()),
                     false,
                     Some(rustfs_common::heal_channel::HealChannelPriority::Normal),
                     Some(self.pool_index),
                     Some(self.set_index),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            ).await;
+                ))
+                .await;
         }
 
         let upload_id_path = upload_id_path.clone();

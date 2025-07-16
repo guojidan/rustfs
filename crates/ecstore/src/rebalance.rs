@@ -1141,10 +1141,10 @@ impl ECStore {
 }
 
 impl SetDisks {
-    #[tracing::instrument(skip(self, rx, cb))]
+    #[tracing::instrument(skip(self, _rx, cb))]
     pub async fn list_objects_to_rebalance(
         self: &Arc<Self>,
-        rx: B_Receiver<bool>,
+        _rx: B_Receiver<bool>,
         bucket: String,
         cb: ListCallback,
     ) -> Result<()> {
@@ -1167,36 +1167,33 @@ impl SetDisks {
         };
 
         let cb1 = cb.clone();
-        list_path_raw(
-            rx,
-            ListPathRawOptions {
-                disks: disks.iter().cloned().map(Some).collect(),
-                bucket: bucket.clone(),
-                recursice: true,
-                min_disks: listing_quorum,
-                agreed: Some(Box::new(move |entry: MetaCacheEntry| {
-                    info!("list_objects_to_rebalance: agreed: {:?}", &entry.name);
-                    Box::pin(cb1(entry))
-                })),
-                partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
-                    // let cb = cb.clone();
-                    let resolver = resolver.clone();
-                    let cb = cb.clone();
+        list_path_raw(ListPathRawOptions {
+            disks: disks.iter().cloned().map(Some).collect(),
+            bucket: bucket.clone(),
+            recursive: true,
+            min_disks: listing_quorum,
+            agreed: Some(Box::new(move |entry: MetaCacheEntry| {
+                info!("list_objects_to_rebalance: agreed: {:?}", &entry.name);
+                Box::pin(cb1(entry))
+            })),
+            partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
+                // let cb = cb.clone();
+                let resolver = resolver.clone();
+                let cb = cb.clone();
 
-                    match entries.resolve(resolver) {
-                        Some(entry) => {
-                            info!("list_objects_to_rebalance: list_objects_to_decommission get {}", &entry.name);
-                            Box::pin(async move { cb(entry).await })
-                        }
-                        None => {
-                            info!("list_objects_to_rebalance: list_objects_to_decommission get none");
-                            Box::pin(async {})
-                        }
+                match entries.resolve(resolver) {
+                    Some(entry) => {
+                        info!("list_objects_to_rebalance: list_objects_to_decommission get {}", &entry.name);
+                        Box::pin(async move { cb(entry).await })
                     }
-                })),
-                ..Default::default()
-            },
-        )
+                    None => {
+                        info!("list_objects_to_rebalance: list_objects_to_decommission get none");
+                        Box::pin(async {})
+                    }
+                }
+            })),
+            ..Default::default()
+        })
         .await?;
 
         info!("list_objects_to_rebalance: list_objects_to_rebalance done");

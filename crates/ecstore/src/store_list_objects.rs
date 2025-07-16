@@ -711,7 +711,6 @@ impl ECStore {
         for eset in self.pools.iter() {
             for set in eset.disk_set.iter() {
                 let (mut disks, infos, _) = set.get_online_disks_with_healing_and_info(true).await;
-                let rx = rx.resubscribe();
                 let opts = opts.clone();
 
                 let (sender, list_out_rx) = mpsc::channel::<MetaCacheEntry>(1);
@@ -769,48 +768,45 @@ impl ECStore {
                     let tx1 = sender.clone();
                     let tx2 = sender.clone();
 
-                    list_path_raw(
-                        rx.resubscribe(),
-                        ListPathRawOptions {
-                            disks: disks.iter().cloned().map(Some).collect(),
-                            fallback_disks: fallback_disks.iter().cloned().map(Some).collect(),
-                            bucket: bucket.to_owned(),
-                            path,
-                            recursice: true,
-                            filter_prefix: Some(filter_prefix),
-                            forward_to: opts.marker.clone(),
-                            min_disks: listing_quorum,
-                            per_disk_limit: opts.limit as i32,
-                            agreed: Some(Box::new(move |entry: MetaCacheEntry| {
-                                Box::pin({
-                                    let value = tx1.clone();
-                                    async move {
-                                        if entry.is_dir() {
-                                            return;
-                                        }
+                    list_path_raw(ListPathRawOptions {
+                        disks: disks.iter().cloned().map(Some).collect(),
+                        fallback_disks: fallback_disks.iter().cloned().map(Some).collect(),
+                        bucket: bucket.to_owned(),
+                        path,
+                        recursive: true,
+                        filter_prefix: Some(filter_prefix),
+                        forward_to: opts.marker.clone(),
+                        min_disks: listing_quorum,
+                        per_disk_limit: opts.limit as i32,
+                        agreed: Some(Box::new(move |entry: MetaCacheEntry| {
+                            Box::pin({
+                                let value = tx1.clone();
+                                async move {
+                                    if entry.is_dir() {
+                                        return;
+                                    }
+                                    if let Err(err) = value.send(entry).await {
+                                        error!("list_path send fail {:?}", err);
+                                    }
+                                }
+                            })
+                        })),
+                        partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
+                            Box::pin({
+                                let value = tx2.clone();
+                                let resolver = resolver.clone();
+                                async move {
+                                    if let Some(entry) = entries.resolve(resolver) {
                                         if let Err(err) = value.send(entry).await {
                                             error!("list_path send fail {:?}", err);
                                         }
                                     }
-                                })
-                            })),
-                            partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
-                                Box::pin({
-                                    let value = tx2.clone();
-                                    let resolver = resolver.clone();
-                                    async move {
-                                        if let Some(entry) = entries.resolve(resolver) {
-                                            if let Err(err) = value.send(entry).await {
-                                                error!("list_path send fail {:?}", err);
-                                            }
-                                        }
-                                    }
-                                })
-                            })),
-                            finished: None,
-                            ..Default::default()
-                        },
-                    )
+                                }
+                            })
+                        })),
+                        finished: None,
+                        ..Default::default()
+                    })
                     .await
                 });
             }
@@ -1228,7 +1224,7 @@ async fn merge_entry_channels(
 }
 
 impl SetDisks {
-    pub async fn list_path(&self, rx: B_Receiver<bool>, opts: ListPathOptions, sender: Sender<MetaCacheEntry>) -> Result<()> {
+    pub async fn list_path(&self, _rx: B_Receiver<bool>, opts: ListPathOptions, sender: Sender<MetaCacheEntry>) -> Result<()> {
         let (mut disks, infos, _) = self.get_online_disks_with_healing_and_info(true).await;
 
         let mut ask_disks = get_list_quorum(&opts.ask_disks, self.set_drive_count as i32);
@@ -1279,45 +1275,42 @@ impl SetDisks {
         let tx1 = sender.clone();
         let tx2 = sender.clone();
 
-        list_path_raw(
-            rx,
-            ListPathRawOptions {
-                disks: disks.iter().cloned().map(Some).collect(),
-                fallback_disks: fallback_disks.iter().cloned().map(Some).collect(),
-                bucket: opts.bucket,
-                path: opts.base_dir,
-                recursice: opts.recursive,
-                filter_prefix: opts.filter_prefix,
-                forward_to: opts.marker,
-                min_disks: listing_quorum,
-                per_disk_limit: limit,
-                agreed: Some(Box::new(move |entry: MetaCacheEntry| {
-                    Box::pin({
-                        let value = tx1.clone();
-                        async move {
+        list_path_raw(ListPathRawOptions {
+            disks: disks.iter().cloned().map(Some).collect(),
+            fallback_disks: fallback_disks.iter().cloned().map(Some).collect(),
+            bucket: opts.bucket,
+            path: opts.base_dir,
+            recursive: opts.recursive,
+            filter_prefix: opts.filter_prefix,
+            forward_to: opts.marker,
+            min_disks: listing_quorum,
+            per_disk_limit: limit,
+            agreed: Some(Box::new(move |entry: MetaCacheEntry| {
+                Box::pin({
+                    let value = tx1.clone();
+                    async move {
+                        if let Err(err) = value.send(entry).await {
+                            error!("list_path send fail {:?}", err);
+                        }
+                    }
+                })
+            })),
+            partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
+                Box::pin({
+                    let value = tx2.clone();
+                    let resolver = resolver.clone();
+                    async move {
+                        if let Some(entry) = entries.resolve(resolver) {
                             if let Err(err) = value.send(entry).await {
                                 error!("list_path send fail {:?}", err);
                             }
                         }
-                    })
-                })),
-                partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
-                    Box::pin({
-                        let value = tx2.clone();
-                        let resolver = resolver.clone();
-                        async move {
-                            if let Some(entry) = entries.resolve(resolver) {
-                                if let Err(err) = value.send(entry).await {
-                                    error!("list_path send fail {:?}", err);
-                                }
-                            }
-                        }
-                    })
-                })),
-                finished: None,
-                ..Default::default()
-            },
-        )
+                    }
+                })
+            })),
+            finished: None,
+            ..Default::default()
+        })
         .await
         .map_err(Error::other)
     }

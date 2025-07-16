@@ -1251,7 +1251,7 @@ impl FolderScanner {
                 resolver.bucket = bucket.clone();
                 let found_objs = Arc::new(RwLock::new(false));
                 let found_objs_clone = found_objs.clone();
-                let (tx, rx) = broadcast::channel(1);
+                let (tx, _rx) = broadcast::channel(1);
                 // let tx_partial = tx.clone();
                 let tx_finished = tx.clone();
                 let update_current_path_agreed = self.update_current_path.clone();
@@ -1262,7 +1262,7 @@ impl FolderScanner {
                     disks: self.disks.clone(),
                     bucket: bucket.clone(),
                     path: prefix.clone(),
-                    recursice: true,
+                    recursive: true,
                     report_not_found: true,
                     min_disks: self.disks_quorum,
                     agreed: Some(Box::new(move |entry: MetaCacheEntry| {
@@ -1372,7 +1372,7 @@ impl FolderScanner {
                     })),
                     ..Default::default()
                 };
-                let _ = list_path_raw(rx, lopts).await;
+                let _ = list_path_raw(lopts).await;
 
                 if *found_objs.read().await {
                     let this: CachedFolder = CachedFolder {

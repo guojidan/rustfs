@@ -1326,10 +1326,10 @@ impl ECStore {
 pub type ListCallback = Arc<dyn Fn(MetaCacheEntry) -> BoxFuture<'static, ()> + Send + Sync + 'static>;
 
 impl SetDisks {
-    #[tracing::instrument(skip(self, rx, cb_func))]
+    #[tracing::instrument(skip(self, _rx, cb_func))]
     async fn list_objects_to_decommission(
         self: &Arc<Self>,
-        rx: B_Receiver<bool>,
+        _rx: B_Receiver<bool>,
         bucket_info: DecomBucketInfo,
         cb_func: ListCallback,
     ) -> Result<()> {
@@ -1349,34 +1349,31 @@ impl SetDisks {
 
         let cb1 = cb_func.clone();
 
-        list_path_raw(
-            rx,
-            ListPathRawOptions {
-                disks: disks.iter().cloned().map(Some).collect(),
-                bucket: bucket_info.name.clone(),
-                path: bucket_info.prefix.clone(),
-                recursice: true,
-                min_disks: listing_quorum,
-                agreed: Some(Box::new(move |entry: MetaCacheEntry| Box::pin(cb1(entry)))),
-                partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
-                    let resolver = resolver.clone();
-                    let cb_func = cb_func.clone();
-                    match entries.resolve(resolver) {
-                        Some(entry) => {
-                            warn!("decommission_pool: list_objects_to_decommission get {}", &entry.name);
-                            Box::pin(async move {
-                                cb_func(entry).await;
-                            })
-                        }
-                        None => {
-                            warn!("decommission_pool: list_objects_to_decommission get none");
-                            Box::pin(async {})
-                        }
+        list_path_raw(ListPathRawOptions {
+            disks: disks.iter().cloned().map(Some).collect(),
+            bucket: bucket_info.name.clone(),
+            path: bucket_info.prefix.clone(),
+            recursive: true,
+            min_disks: listing_quorum,
+            agreed: Some(Box::new(move |entry: MetaCacheEntry| Box::pin(cb1(entry)))),
+            partial: Some(Box::new(move |entries: MetaCacheEntries, _: &[Option<DiskError>]| {
+                let resolver = resolver.clone();
+                let cb_func = cb_func.clone();
+                match entries.resolve(resolver) {
+                    Some(entry) => {
+                        warn!("decommission_pool: list_objects_to_decommission get {}", &entry.name);
+                        Box::pin(async move {
+                            cb_func(entry).await;
+                        })
                     }
-                })),
-                ..Default::default()
-            },
-        )
+                    None => {
+                        warn!("decommission_pool: list_objects_to_decommission get none");
+                        Box::pin(async {})
+                    }
+                }
+            })),
+            ..Default::default()
+        })
         .await?;
 
         Ok(())
