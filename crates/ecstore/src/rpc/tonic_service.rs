@@ -22,21 +22,17 @@ use crate::{
         DeleteOptions, DiskAPI, DiskInfoOptions, DiskStore, FileInfoVersions, ReadMultipleReq, ReadOptions, UpdateMetadataOpts,
         error::DiskError,
     },
-    heal::{
-        data_usage_cache::DataUsageCache,
-        heal_commands::{HealOpts, get_local_background_heal_status},
-    },
     metrics_realtime::{CollectMetricsOpts, MetricType, collect_local_metrics},
     new_object_layer_fn,
     rpc::{LocalPeerS3Client, PeerS3Client},
     store::{all_local_disk_path, find_local_disk},
     store_api::{BucketOptions, DeleteBucketOptions, MakeBucketOptions, StorageAPI},
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use futures_util::future::join_all;
 use rustfs_lock::{GLOBAL_LOCAL_SERVER, Locker, lock_args::LockArgs};
 
-use rustfs_common::globals::GLOBAL_Local_Node_Name;
+use rustfs_common::{globals::GLOBAL_Local_Node_Name, heal_channel::HealOpts};
 
 use bytes::Bytes;
 use rmp_serde::{Deserializer, Serializer};
@@ -1399,96 +1395,6 @@ impl Node for NodeService {
         }
     }
 
-    type NsScannerStream = ResponseStream<NsScannerResponse>;
-    async fn ns_scanner(&self, request: Request<Streaming<NsScannerRequest>>) -> Result<Response<Self::NsScannerStream>, Status> {
-        info!("ns_scanner");
-
-        let mut in_stream = request.into_inner();
-        let (tx, rx) = mpsc::channel(10);
-
-        tokio::spawn(async move {
-            match in_stream.next().await {
-                Some(Ok(request)) => {
-                    if let Some(disk) = find_local_disk(&request.disk).await {
-                        let cache = match serde_json::from_str::<DataUsageCache>(&request.cache) {
-                            Ok(cache) => cache,
-                            Err(err) => {
-                                tx.send(Ok(NsScannerResponse {
-                                    success: false,
-                                    update: "".to_string(),
-                                    data_usage_cache: "".to_string(),
-                                    error: Some(DiskError::other(format!("decode DataUsageCache failed: {err}")).into()),
-                                }))
-                                .await
-                                .expect("working rx");
-                                return;
-                            }
-                        };
-                        let (updates_tx, mut updates_rx) = mpsc::channel(100);
-                        let tx_clone = tx.clone();
-                        let task = tokio::spawn(async move {
-                            loop {
-                                match updates_rx.recv().await {
-                                    Some(update) => {
-                                        let update = serde_json::to_string(&update).expect("encode failed");
-                                        tx_clone
-                                            .send(Ok(NsScannerResponse {
-                                                success: true,
-                                                update,
-                                                data_usage_cache: "".to_string(),
-                                                error: None,
-                                            }))
-                                            .await
-                                            .expect("working rx");
-                                    }
-                                    None => return,
-                                }
-                            }
-                        });
-                        let data_usage_cache = disk.ns_scanner(&cache, updates_tx, request.scan_mode as usize, None).await;
-                        let _ = task.await;
-                        match data_usage_cache {
-                            Ok(data_usage_cache) => {
-                                let data_usage_cache = serde_json::to_string(&data_usage_cache).expect("encode failed");
-                                tx.send(Ok(NsScannerResponse {
-                                    success: true,
-                                    update: "".to_string(),
-                                    data_usage_cache,
-                                    error: None,
-                                }))
-                                .await
-                                .expect("working rx");
-                            }
-                            Err(err) => {
-                                tx.send(Ok(NsScannerResponse {
-                                    success: false,
-                                    update: "".to_string(),
-                                    data_usage_cache: "".to_string(),
-                                    error: Some(err.into()),
-                                }))
-                                .await
-                                .expect("working rx");
-                            }
-                        }
-                    } else {
-                        tx.send(Ok(NsScannerResponse {
-                            success: false,
-                            update: "".to_string(),
-                            data_usage_cache: "".to_string(),
-                            error: Some(DiskError::other("can not find disk".to_string()).into()),
-                        }))
-                        .await
-                        .expect("working rx");
-                    }
-                }
-                _ => todo!(),
-            }
-        });
-
-        let out_stream = ReceiverStream::new(rx);
-        Ok(tonic::Response::new(Box::pin(out_stream)))
-    }
-
     async fn lock(&self, request: Request<GenerallyLockRequest>) -> Result<Response<GenerallyLockResponse>, Status> {
         let request = request.into_inner();
         match &serde_json::from_str::<LockArgs>(&request.args) {
@@ -2122,28 +2028,7 @@ impl Node for NodeService {
         &self,
         _request: Request<BackgroundHealStatusRequest>,
     ) -> Result<Response<BackgroundHealStatusResponse>, Status> {
-        let (state, ok) = get_local_background_heal_status().await;
-        if !ok {
-            return Ok(tonic::Response::new(BackgroundHealStatusResponse {
-                success: false,
-                bg_heal_state: Bytes::new(),
-                error_info: Some("errServerNotInitialized".to_string()),
-            }));
-        }
-
-        let mut buf = Vec::new();
-        if let Err(err) = state.serialize(&mut Serializer::new(&mut buf)) {
-            return Ok(tonic::Response::new(BackgroundHealStatusResponse {
-                success: false,
-                bg_heal_state: Bytes::new(),
-                error_info: Some(err.to_string()),
-            }));
-        }
-        Ok(tonic::Response::new(BackgroundHealStatusResponse {
-            success: true,
-            bg_heal_state: buf.into(),
-            error_info: None,
-        }))
+        todo!()
     }
 
     async fn get_metacache_listing(
@@ -3336,20 +3221,6 @@ mod tests {
         let proc_response = response.unwrap().into_inner();
         assert!(proc_response.success);
         assert!(!proc_response.proc_info.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_background_heal_status() {
-        let service = create_test_node_service();
-
-        let request = Request::new(BackgroundHealStatusRequest {});
-
-        let response = service.background_heal_status(request).await;
-        assert!(response.is_ok());
-
-        let heal_response = response.unwrap().into_inner();
-        // May fail if heal status is not available
-        assert!(heal_response.success || heal_response.error_info.is_some());
     }
 
     #[tokio::test]
