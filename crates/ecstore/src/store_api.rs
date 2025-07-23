@@ -925,6 +925,8 @@ pub trait StorageAPI: ObjectIO {
 
     // GetObjectNInfo ObjectIO
     async fn get_object_info(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<ObjectInfo>;
+    async fn verify_object_integrity(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<()>;
+
     // PutObject ObjectIO
     // CopyObject
     async fn copy_object(
