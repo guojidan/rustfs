@@ -2593,37 +2593,67 @@ impl SetDisks {
                                     "rename temp data, src_volume: {}, src_path: {}, dst_volume: {}, dst_path: {}",
                                     RUSTFS_META_TMP_BUCKET, tmp_id, bucket, object
                                 );
-                                if let Err(err) = disk
+                                let rename_result = disk
                                     .rename_data(RUSTFS_META_TMP_BUCKET, &tmp_id, parts_metadata[index].clone(), bucket, object)
-                                    .await
-                                {
-                                    info!("rename temp data err: {}", err.to_string());
-                                    // self.delete_all(RUSTFS_META_TMP_BUCKET, &tmp_id).await?;
-                                    return Ok((result, Some(err)));
-                                }
-
-                                info!("remove temp object, volume: {}, path: {}", RUSTFS_META_TMP_BUCKET, tmp_id);
-                                self.delete_all(RUSTFS_META_TMP_BUCKET, &tmp_id)
-                                    .await
-                                    .map_err(DiskError::other)?;
-                                if parts_metadata[index].is_remote() {
-                                    let rm_data_dir = parts_metadata[index].data_dir.unwrap().to_string();
-                                    let d_path = Path::new(&encode_dir_object(object)).join(rm_data_dir);
-                                    disk.delete(
-                                        bucket,
-                                        d_path.to_str().unwrap(),
-                                        DeleteOptions {
-                                            immediate: true,
-                                            recursive: true,
-                                            ..Default::default()
-                                        },
-                                    )
-                                    .await?;
-                                }
-
-                                for (i, v) in result.before.drives.iter().enumerate() {
-                                    if v.endpoint == disk.endpoint().to_string() {
-                                        result.after.drives[i].state = DriveState::Ok.to_string();
+                                    .await;
+                                if let Err(err) = &rename_result {
+                                    info!(
+                                        "rename temp data err: {}. Try fallback to direct xl.meta overwrite...",
+                                        err.to_string()
+                                    );
+                                    let healthy_index = latest_disks.iter().position(|d| d.is_some()).unwrap_or(0);
+                                    if let Some(healthy_disk) = &latest_disks[healthy_index] {
+                                        let xlmeta_path = format!("{object}/xl.meta");
+                                        match healthy_disk.read_all(bucket, &xlmeta_path).await {
+                                            Ok(xlmeta_bytes) => {
+                                                if let Err(e) = disk.write_all(bucket, &xlmeta_path, xlmeta_bytes).await {
+                                                    info!("fallback xl.meta overwrite failed: {}", e.to_string());
+                                                    return Ok((
+                                                        result,
+                                                        Some(DiskError::other(format!("fallback xl.meta overwrite failed: {e}"))),
+                                                    ));
+                                                } else {
+                                                    info!("fallback xl.meta overwrite succeeded for disk {}", disk.to_string());
+                                                }
+                                            }
+                                            Err(e) => {
+                                                info!("read healthy xl.meta failed: {}", e.to_string());
+                                                return Ok((
+                                                    result,
+                                                    Some(DiskError::other(format!("read healthy xl.meta failed: {e}"))),
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        info!("no healthy disk found for xl.meta fallback overwrite");
+                                        return Ok((
+                                            result,
+                                            Some(DiskError::other("no healthy disk found for xl.meta fallback overwrite")),
+                                        ));
+                                    }
+                                } else {
+                                    info!("remove temp object, volume: {}, path: {}", RUSTFS_META_TMP_BUCKET, tmp_id);
+                                    self.delete_all(RUSTFS_META_TMP_BUCKET, &tmp_id)
+                                        .await
+                                        .map_err(DiskError::other)?;
+                                    if parts_metadata[index].is_remote() {
+                                        let rm_data_dir = parts_metadata[index].data_dir.unwrap().to_string();
+                                        let d_path = Path::new(&encode_dir_object(object)).join(rm_data_dir);
+                                        disk.delete(
+                                            bucket,
+                                            d_path.to_str().unwrap(),
+                                            DeleteOptions {
+                                                immediate: true,
+                                                recursive: true,
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await?;
+                                    }
+                                    for (i, v) in result.before.drives.iter().enumerate() {
+                                        if v.endpoint == disk.endpoint().to_string() {
+                                            result.after.drives[i].state = DriveState::Ok.to_string();
+                                        }
                                     }
                                 }
                             }
