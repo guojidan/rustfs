@@ -24,7 +24,7 @@ use super::{endpoint::Endpoint, error::DiskError, format::FormatV3};
 use crate::disk::error::FileAccessDeniedWithContext;
 use crate::disk::error_conv::{to_access_error, to_file_error, to_unformatted_disk_error, to_volume_error};
 use crate::disk::fs::{
-    O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, access, lstat, lstat_std, remove, remove_all_std, remove_std, rename,
+    O_CREATE, O_RDONLY, O_WRONLY, access, lstat, lstat_std, remove, remove_all_std, remove_std, rename,
 };
 use crate::disk::os::{check_path_length, is_empty_dir};
 use crate::disk::{
@@ -50,7 +50,7 @@ use rustfs_utils::HashAlgorithm;
 use rustfs_utils::os::get_info;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::io::SeekFrom;
+// use std::io::SeekFrom;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -60,7 +60,7 @@ use std::{
 };
 use time::OffsetDateTime;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, ErrorKind};
+use tokio::io::{AsyncWrite, ErrorKind};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -592,7 +592,7 @@ impl LocalDisk {
         volume_dir: impl AsRef<Path>,
         file_path: impl AsRef<Path>,
     ) -> Result<(Vec<u8>, Option<OffsetDateTime>)> {
-        let mut f = match super::fs::open_file(file_path.as_ref(), O_RDONLY).await {
+    let f = match super::fs::open_file(file_path.as_ref(), O_RDONLY).await {
             Ok(f) => f,
             Err(e) => {
                 if e.kind() == ErrorKind::NotFound && !skip_access_checks(volume) {
@@ -614,11 +614,10 @@ impl LocalDisk {
             return Err(DiskError::FileNotFound);
         }
 
-        let size = meta.len() as usize;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(size).map_err(Error::other)?;
-
-        f.read_to_end(&mut bytes).await.map_err(to_file_error)?;
+        // Use io_uring-accelerated full-file read when enabled via super::fs::read_file
+        let bytes = super::fs::read_file(file_path.as_ref())
+            .await
+            .map_err(to_file_error)?;
 
         let modtime = match meta.modified() {
             Ok(md) => Some(OffsetDateTime::from(md)),
@@ -728,33 +727,18 @@ impl LocalDisk {
         &self,
         file_path: &Path,
         data: InternalBuf<'_>,
-        sync: bool,
-        skip_parent: &Path,
+    _sync: bool,
+    _skip_parent: &Path,
     ) -> Result<()> {
-        let flags = O_CREATE | O_WRONLY | O_TRUNC;
-
-        let mut f = {
-            if sync {
-                // TODO: support sync
-                self.open_file(file_path, flags, skip_parent).await?
-            } else {
-                self.open_file(file_path, flags, skip_parent).await?
-            }
-        };
-
+        // For whole-file writes, prefer fs::write_file (io_uring-enabled) to reduce syscalls.
         match data {
             InternalBuf::Ref(buf) => {
-                f.write_all(buf).await.map_err(to_file_error)?;
+                super::fs::write_file(file_path, buf, true).await.map_err(to_file_error)?;
             }
             InternalBuf::Owned(buf) => {
-                // Reduce one copy by using the owned buffer directly.
-                // It may be more efficient for larger writes.
-                let mut f = f.into_std().await;
-                let task = tokio::task::spawn_blocking(move || {
-                    use std::io::Write as _;
-                    f.write_all(buf.as_ref()).map_err(to_file_error)
-                });
-                task.await??;
+                super::fs::write_file(file_path, buf.as_ref(), true)
+                    .await
+                    .map_err(to_file_error)?;
             }
         }
 
@@ -1074,7 +1058,7 @@ pub async fn read_file_all(path: impl AsRef<Path>) -> Result<(Bytes, Metadata)> 
     let p = path.as_ref();
     let meta = read_file_metadata(&path).await?;
 
-    let data = fs::read(&p).await.map_err(to_file_error)?;
+    let data = super::fs::read_file(&p).await.map_err(to_file_error)?;
 
     Ok((data.into(), meta))
 }
@@ -1570,9 +1554,73 @@ impl DiskAPI for LocalDisk {
         let file_path = volume_dir.join(Path::new(&path));
         check_path_length(file_path.to_string_lossy().to_string().as_str())?;
 
-        let f = self.open_file(file_path, O_CREATE | O_APPEND | O_WRONLY, volume_dir).await?;
+    // Provide an AsyncWrite adapter that batches writes and calls fs::append_file on flush/drop.
+    use tokio::io::AsyncWrite;
 
-        Ok(Box::new(f))
+        struct AppendWriter {
+            path: std::path::PathBuf,
+            buf: bytes::BytesMut,
+        }
+
+        impl AppendWriter {
+            fn new(path: std::path::PathBuf) -> Self {
+                Self { path, buf: bytes::BytesMut::with_capacity(64 * 1024) }
+            }
+        }
+
+        impl Drop for AppendWriter {
+            fn drop(&mut self) {
+                if self.buf.is_empty() { return; }
+                let path = self.path.clone();
+                let data = self.buf.split().freeze();
+                // Fire-and-forget best effort on drop; errors cannot be surfaced here.
+                let _ = tokio::spawn(async move {
+                    let _ = super::fs::append_file(&path, &data).await;
+                });
+            }
+        }
+
+        impl AsyncWrite for AppendWriter {
+            fn poll_write(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                self.buf.extend_from_slice(buf);
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let path = self.path.clone();
+                let data = self.buf.split().freeze();
+                // Perform append synchronously for flush
+                let fut = async move { super::fs::append_file(path, &data).await };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        let _ = handle.block_on(fut);
+                    }
+                    Err(_) => {
+                        // No runtime; spawn a temp runtime
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(fut)?;
+                    }
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                self.poll_flush(cx)
+            }
+        }
+
+        let writer: FileWriter = Box::new(AppendWriter::new(file_path));
+        Ok(writer)
     }
 
     // TODO: io verifier
@@ -1606,24 +1654,14 @@ impl DiskAPI for LocalDisk {
         let file_path = volume_dir.join(Path::new(&path));
         check_path_length(file_path.to_string_lossy().to_string().as_str())?;
 
-        let mut f = self.open_file(file_path, O_RDONLY, volume_dir).await?;
-
-        let meta = f.metadata().await?;
-        if meta.len() < (offset + length) as u64 {
-            error!(
-                "read_file_stream: file size is less than offset + length {} + {} = {}",
-                offset,
-                length,
-                meta.len()
-            );
-            return Err(DiskError::FileCorrupt);
-        }
-
-        if offset > 0 {
-            f.seek(SeekFrom::Start(offset as u64)).await?;
-        }
-
-        Ok(Box::new(f))
+        // Read the requested range via fs facade (io_uring-enabled) and return a reader over the buffer.
+    let buf = super::fs::read_file_range(&file_path, offset as u64, length)
+            .await
+            .map_err(to_file_error)?;
+    use futures::io::Cursor as FuturesCursor;
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
+    let reader = FuturesCursor::new(buf).compat();
+    Ok(Box::new(reader))
     }
     #[tracing::instrument(level = "debug", skip(self))]
     async fn list_dir(&self, origvolume: &str, volume: &str, dir_path: &str, count: i32) -> Result<Vec<String>> {

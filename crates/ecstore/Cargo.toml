@@ -32,6 +32,8 @@ workspace = true
 
 [features]
 default = []
+# Enable io_uring accelerated file IO on Linux
+uring-io = ["dep:tokio-uring"]
 
 [dependencies]
 rustfs-config = { workspace = true, features = ["constants", "notify"] }
@@ -100,6 +102,7 @@ rustfs-rio.workspace = true
 rustfs-signer.workspace = true
 rustfs-checksums.workspace = true
 futures-util.workspace = true
+tokio-uring = { version = "0.5", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 nix = { workspace = true }

@@ -18,6 +18,9 @@ use tokio::{
     fs::{self, File},
     io,
 };
+#[cfg(all(target_os = "linux", feature = "uring-io"))]
+use tokio::task;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[cfg(not(windows))]
 pub fn same_file(f1: &Metadata, f2: &Metadata) -> bool {
@@ -194,8 +197,181 @@ pub fn rename_std(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
+// io_uring-accelerated whole-file read on Linux when feature is enabled.
+// Fallback to Tokio elsewhere.
+#[cfg(all(target_os = "linux", feature = "uring-io"))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    use std::path::PathBuf;
+
+    let path: PathBuf = path.as_ref().to_path_buf();
+    // Run a dedicated tokio-uring runtime in a blocking thread for this op.
+    // This keeps integration simple without changing the outer tokio runtime.
+    task::spawn_blocking(move || {
+        tokio_uring::start(async move {
+            use tokio_uring::buf::IoBufMut;
+            use tokio_uring::fs::File as UringFile;
+
+            // Get size via standard metadata (cheap and fine here).
+            let meta = std::fs::metadata(&path)?;
+            if meta.is_dir() {
+                return Err(io::Error::new(io::ErrorKind::Other, "is a directory"));
+            }
+            let size = meta.len() as usize;
+
+            let file = UringFile::open(&path).await?;
+
+            // Read entire file into a single buffer via read_at(0).
+            let buf = vec![0u8; size];
+            let (res, mut buf) = file.read_at(buf, 0).await;
+            match res {
+                Ok(n) => {
+                    buf.truncate(n);
+                    Ok::<_, io::Error>(buf)
+                }
+                Err(e) => Err(e),
+            }
+        })
+    })
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("uring join error: {e}")))?
+}
+
+#[cfg(not(all(target_os = "linux", feature = "uring-io")))]
 pub async fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     fs::read(path.as_ref()).await
+}
+
+// Read a specific range [offset, offset+length) from file.
+#[cfg(all(target_os = "linux", feature = "uring-io"))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn read_file_range(path: impl AsRef<Path>, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+    use std::path::PathBuf;
+    let path: PathBuf = path.as_ref().to_path_buf();
+    task::spawn_blocking(move || {
+        tokio_uring::start(async move {
+            use tokio_uring::buf::IoBufMut;
+            use tokio_uring::fs::File as UringFile;
+
+            let file = UringFile::open(&path).await?;
+            let mut buf = vec![0u8; length];
+            let (res, mut buf) = file.read_at(buf, offset).await;
+            match res {
+                Ok(n) => {
+                    buf.truncate(n);
+                    Ok::<_, io::Error>(buf)
+                }
+                Err(e) => Err(e),
+            }
+        })
+    })
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("uring join error: {e}")))?
+}
+
+#[cfg(not(all(target_os = "linux", feature = "uring-io")))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn read_file_range(path: impl AsRef<Path>, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+    let mut f = File::open(path).await?;
+    if offset > 0 {
+        f.seek(std::io::SeekFrom::Start(offset)).await?;
+    }
+    let mut buf = vec![0u8; length];
+    let n = f.read(&mut buf).await?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+// Write whole buffer to a file (truncate) with io_uring acceleration when enabled.
+#[cfg(all(target_os = "linux", feature = "uring-io"))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn write_file(path: impl AsRef<Path>, data: &[u8], truncate: bool) -> io::Result<()> {
+    use std::path::PathBuf;
+    let path: PathBuf = path.as_ref().to_path_buf();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        tokio_uring::start(async move {
+            use tokio_uring::buf::IoBuf;
+            use tokio_uring::fs::OpenOptions as UringOpenOptions;
+
+            let mut opts = UringOpenOptions::new();
+            opts.write(true).create(true);
+            if truncate {
+                opts.truncate(true);
+            }
+            let file = opts.open(&path).await?;
+
+            let mut written: usize = 0;
+            let total = data.len();
+            while written < total {
+                let slice = data[written..].to_vec();
+                let (res, _buf) = file.write_at(slice, written as u64).await;
+                match res {
+                    Ok(0) => break,
+                    Ok(n) => written += n,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok::<_, io::Error>(())
+        })
+    })
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("uring join error: {e}")))??;
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", feature = "uring-io")))]
+pub async fn write_file(path: impl AsRef<Path>, data: &[u8], _truncate: bool) -> io::Result<()> {
+    tokio::fs::write(path, data).await
+}
+
+// Append buffer to a file using io_uring when enabled.
+#[cfg(all(target_os = "linux", feature = "uring-io"))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn append_file(path: impl AsRef<Path>, data: &[u8]) -> io::Result<()> {
+    use std::path::PathBuf;
+    let path: PathBuf = path.as_ref().to_path_buf();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        tokio_uring::start(async move {
+            use tokio_uring::fs::OpenOptions as UringOpenOptions;
+
+            let mut opts = UringOpenOptions::new();
+            opts.write(true).create(true);
+            let file = opts.open(&path).await?;
+
+            // Determine current file size to append at end
+            let meta = std::fs::metadata(&path)?;
+            let mut offset = meta.len();
+
+            let mut written = 0usize;
+            while written < data.len() {
+                let slice = data[written..].to_vec();
+                let (res, _buf) = file.write_at(slice, offset).await;
+                match res {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        written += n;
+                        offset += n as u64;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok::<_, io::Error>(())
+        })
+    })
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("uring join error: {e}")))??;
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", feature = "uring-io")))]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn append_file(path: impl AsRef<Path>, data: &[u8]) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut f = File::options().create(true).append(true).open(path).await?;
+    f.write_all(data).await?;
+    Ok(())
 }
 
 #[cfg(test)]

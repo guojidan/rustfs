@@ -109,6 +109,8 @@ FORCE_CONSOLE_UPDATE=false
 CONSOLE_VERSION="latest"
 SKIP_VERIFICATION=false
 CUSTOM_PLATFORM=""
+# Cargo features (can also be set via env RUSTFS_FEATURES)
+FEATURES="${RUSTFS_FEATURES:-}"
 
 # Print usage
 usage() {
@@ -141,6 +143,8 @@ usage() {
     echo "  --force-console-update     Force update console assets even if they exist"
     echo "  --console-version VERSION  Console version to download (default: latest)"
     echo "  --skip-verification        Skip binary verification after build"
+    echo "  --features FEATURES        Pass cargo features (e.g., 'uring-io' or 'feat1,feat2')"
+    echo "  --uring-io                 Enable io_uring fast path (equivalent to --features uring-io)"
     echo "  -h, --help                 Show this help message"
     echo ""
     echo "Examples:"
@@ -409,6 +413,9 @@ build_binary() {
 
     build_cmd+=" --target $PLATFORM"
     build_cmd+=" -p rustfs --bins"
+    if [[ -n "$FEATURES" ]]; then
+        build_cmd+=" --features ${FEATURES}"
+    fi
 
     print_message $BLUE "📦 Executing: $build_cmd"
 
@@ -533,6 +540,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-verification)
             SKIP_VERIFICATION=true
+            shift
+            ;;
+        --features)
+            FEATURES="$2"
+            shift 2
+            ;;
+        --uring-io)
+            FEATURES="uring-io"
             shift
             ;;
         -h|--help)

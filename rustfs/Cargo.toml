@@ -33,6 +33,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = []
+# One-click enable io_uring in storage backend
+uring-io = ["rustfs-ecstore/uring-io"]
+
 [dependencies]
 rustfs-ahm = { workspace = true }
 rustfs-zip = { workspace = true }

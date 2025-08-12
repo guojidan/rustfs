@@ -367,3 +367,48 @@ help:
 	@echo "  make dev-env-start                       # 启动开发环境"
 	@echo ""
 	@echo "💡 更多帮助请使用 'make help-build' 或 'make help-docker'"
+
+
+# ========================================================================================
+# io_uring convenience targets (Linux-only acceleration)
+# ========================================================================================
+
+.PHONY: build-uring
+build-uring:
+	@echo "⚡ Building RustFS with io_uring enabled..."
+	@if [ "$$(/usr/bin/uname -s)" != "Linux" ]; then \
+		echo "⚠️  io_uring 仅在 Linux 可用，回退为常规构建"; \
+		./build-rustfs.sh; \
+	else \
+		./build-rustfs.sh --features uring-io; \
+	fi
+
+.PHONY: build-dev-uring
+build-dev-uring:
+	@echo "⚡ Building RustFS (dev) with io_uring enabled..."
+	@if [ "$$(/usr/bin/uname -s)" != "Linux" ]; then \
+		echo "⚠️  io_uring 仅在 Linux 可用，回退为常规开发构建"; \
+		./build-rustfs.sh --dev; \
+	else \
+		./build-rustfs.sh --dev --features uring-io; \
+	fi
+
+.PHONY: test-uring
+test-uring:
+	@echo "🧪 Running tests with io_uring feature..."
+	@if [ "$$(/usr/bin/uname -s)" != "Linux" ]; then \
+		echo "⚠️  io_uring 仅在 Linux 可用，回退为常规测试"; \
+		cargo nextest run --all --exclude e2e_test; \
+		cargo test --all --doc; \
+	else \
+		cargo nextest run --all --features uring-io --exclude e2e_test || true; \
+		cargo test --all --features uring-io --doc || true; \
+	fi
+
+.PHONY: help-uring
+help-uring:
+	@echo "⚡ io_uring 快捷命令（Linux）:"
+	@echo "  make build-uring                        # 启用 io_uring 加速构建"
+	@echo "  make build-dev-uring                    # 开发模式启用 io_uring 构建"
+	@echo "  make test-uring                         # 启用 io_uring 的测试"
+	@echo "  或使用脚本参数: ./build-rustfs.sh --uring-io 或 ./build-rustfs.sh --features uring-io"

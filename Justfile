@@ -256,3 +256,43 @@ probe-e2e:
 docker-inspect-multiarch image cli=(DOCKER_CLI):
     @echo "🔍 Inspecting multi-architecture image: {{ image }}"
     {{ cli }} buildx imagetools inspect {{ image }}
+
+
+# ========================================================================================
+# io_uring convenience recipes (Linux-only acceleration)
+# ========================================================================================
+
+[doc("build with io_uring feature (Linux)")]
+[group("🔨 Build")]
+build-uring:
+        @echo "⚡ Building RustFS with io_uring enabled..."
+        if [ "$(uname -s)" != "Linux" ]; then \
+            echo "⚠️  io_uring 仅在 Linux 可用，回退为常规构建"; \
+            ./build-rustfs.sh; \
+        else \
+            ./build-rustfs.sh --features uring-io; \
+        fi
+
+[doc("build (dev) with io_uring feature (Linux)")]
+[group("🔨 Build")]
+build-dev-uring:
+        @echo "⚡ Building RustFS (dev) with io_uring enabled..."
+        if [ "$(uname -s)" != "Linux" ]; then \
+            echo "⚠️  io_uring 仅在 Linux 可用，回退为常规开发构建"; \
+            ./build-rustfs.sh --dev; \
+        else \
+            ./build-rustfs.sh --dev --features uring-io; \
+        fi
+
+[doc("run tests with io_uring feature (Linux)")]
+[group("👆 Code Quality")]
+test-uring:
+        @echo "🧪 Running tests with io_uring feature..."
+        if [ "$(uname -s)" != "Linux" ]; then \
+            echo "⚠️  io_uring 仅在 Linux 可用，回退为常规测试"; \
+            cargo nextest run --all --exclude e2e_test; \
+            cargo test --all --doc; \
+        else \
+            cargo nextest run --all --features uring-io --exclude e2e_test || true; \
+            cargo test --all --features uring-io --doc || true; \
+        fi
