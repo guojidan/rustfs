@@ -706,6 +706,18 @@ impl StorageAPI for Sets {
             .put_object_part(bucket, object, upload_id, part_id, data, opts)
             .await
     }
+    async fn append_object_part(
+        &self,
+        bucket: &str,
+        object: &str,
+        data: &mut PutObjReader,
+        expected_offset: i64,
+        opts: &ObjectOptions,
+    ) -> Result<ObjectInfo> {
+        self.get_disks_by_key(object)
+            .append_object_part(bucket, object, data, expected_offset, opts)
+            .await
+    }
 
     #[tracing::instrument(skip(self))]
     async fn get_multipart_info(
