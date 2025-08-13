@@ -1084,6 +1084,15 @@ pub trait StorageAPI: ObjectIO {
         uploaded_parts: Vec<CompletePart>,
         opts: &ObjectOptions,
     ) -> Result<ObjectInfo>;
+    // Append new data as a new part without rewriting existing data. expected_offset must equal current size.
+    async fn append_object_part(
+        &self,
+        bucket: &str,
+        object: &str,
+        data: &mut PutObjReader,
+        expected_offset: i64,
+        opts: &ObjectOptions,
+    ) -> Result<ObjectInfo>;
     async fn get_disks(&self, pool_idx: usize, set_idx: usize) -> Result<Vec<Option<DiskStore>>>;
     fn set_drive_counts(&self) -> Vec<usize>;
 

@@ -65,7 +65,7 @@ use regex::Regex;
 use rustfs_common::heal_channel::{DriveState, HealChannelPriority, HealItemType, HealOpts, HealScanMode, send_heal_disk};
 use rustfs_filemeta::headers::RESERVED_METADATA_PREFIX_LOWER;
 use rustfs_filemeta::{
-    FileInfo, FileMeta, FileMetaShallowVersion, MetaCacheEntries, MetaCacheEntry, MetadataResolutionParams, ObjectPartInfo,
+    self, FileInfo, FileMeta, FileMetaShallowVersion, MetaCacheEntries, MetaCacheEntry, MetadataResolutionParams, ObjectPartInfo,
     RawFileInfo, file_info_from_raw,
     headers::{AMZ_OBJECT_TAGGING, AMZ_STORAGE_CLASS},
     merge_file_meta_versions,
@@ -4729,7 +4729,7 @@ impl StorageAPI for SetDisks {
 
         // fi.parts = vec![part_info.clone()];
 
-        let part_info_buff = part_info.marshal_msg()?;
+    let part_info_buff = part_info.marshal_msg()?;
 
         drop(writers); // drop writers to close all files
 
@@ -5416,6 +5416,116 @@ impl StorageAPI for SetDisks {
         }
 
         fi.is_latest = true;
+
+        Ok(ObjectInfo::from_file_info(&fi, bucket, object, opts.versioned || opts.version_suspended))
+    }
+
+    #[tracing::instrument(level="debug", skip(self, data, opts))]
+    async fn append_object_part(
+        &self,
+        bucket: &str,
+        object: &str,
+        data: &mut PutObjReader,
+        expected_offset: i64,
+        opts: &ObjectOptions,
+    ) -> Result<ObjectInfo> {
+        // 获取现有对象信息
+        let (mut fi, files_metas, disks) = self.get_object_fileinfo(bucket, object, opts, false).await?;
+        if fi.size != expected_offset {
+            // front layer maps this specific phrase to PreconditionFailed
+            return Err(Error::other("append offset mismatch: expected current size"));
+        }
+        if fi.parts.is_empty() {
+            return Err(Error::other("object has no existing parts (cannot append to empty)"));
+        }
+    // 仅支持未压缩未加密 (通过元数据关键字简单判断加密)
+    if fi.is_compressed() || fi.metadata.keys().any(|k| k.contains("server-side-encryption")) {
+            return Err(Error::other("append not supported for compressed/encrypted object (state)"));
+        }
+
+        // 新 part 编号 = 现有最大 part.number + 1
+        let new_part_number = fi.parts.iter().map(|p| p.number).max().unwrap_or(0) + 1;
+
+        // 复用 multipart 单 part 写入逻辑: 临时构建一个假的 upload_id 目录写入新 part (同 put_object_part 内部逻辑简化)
+        // 为了最小侵入，这里直接参考 put_object_part 中流程，单独实现写入。
+        let write_quorum = fi.write_quorum(self.default_write_quorum());
+        let disks_guard = self.disks.read().await;
+        let disks_vec = disks_guard.clone();
+        let shuffle_disks = Self::shuffle_disks(&disks_vec, &fi.erasure.distribution);
+
+        let erasure = erasure_coding::Erasure::new(fi.erasure.data_blocks, fi.erasure.parity_blocks, fi.erasure.block_size);
+
+        let part_suffix = format!("part.{new_part_number}");
+        let tmp_part = format!("{}x{}", Uuid::new_v4(), OffsetDateTime::now_utc().unix_timestamp());
+        let tmp_part_path = Arc::new(format!("{tmp_part}/{part_suffix}"));
+
+        let mut writers = Vec::with_capacity(shuffle_disks.len());
+        let mut errors = Vec::with_capacity(shuffle_disks.len());
+        for disk_op in shuffle_disks.iter() {
+            if let Some(disk) = disk_op {
+                let writer = create_bitrot_writer(
+                    false,
+                    Some(disk),
+                    RUSTFS_META_TMP_BUCKET,
+                    &tmp_part_path,
+                    erasure.shard_file_size(data.size()),
+                    erasure.shard_size(),
+                    HashAlgorithm::HighwayHash256,
+                ).await?;
+                writers.push(Some(writer));
+                errors.push(None);
+            } else {
+                errors.push(Some(DiskError::DiskNotFound));
+                writers.push(None);
+            }
+        }
+        let ok_writers = errors.iter().filter(|e| e.is_none()).count();
+        if ok_writers < write_quorum {
+            return Err(Error::other("not enough disks for append"));
+        }
+        let stream = mem::replace(&mut data.stream, HashReader::new(Box::new(WarpReader::new(Cursor::new(Vec::new()))), 0, 0, None, false)?);
+        let (reader, w_size) = Arc::new(erasure).encode(stream, &mut writers, write_quorum).await?;
+        let _ = mem::replace(&mut data.stream, reader);
+        if (w_size as i64) < data.size() {
+            return Err(Error::other("append write size mismatch"));
+        }
+        let index_op = data.stream.try_get_index().map(|v| v.clone().into_vec());
+        let etag = data.stream.try_resolve_etag().unwrap_or_default();
+        let mut actual_size = data.actual_size();
+        if actual_size < 0 { actual_size = w_size as i64; }
+        let part_info = ObjectPartInfo { etag: etag.clone(), number: new_part_number, size: w_size, mod_time: Some(OffsetDateTime::now_utc()), actual_size, index: index_op, ..Default::default() };
+        let part_info_buff = part_info.marshal_msg()?;
+        drop(writers);
+
+        // 目标 part 路径: 复用现有数据目录 fi.data_dir
+        // 目标 part 路径: bucket/object/<data_dir>/part.N  (与完整对象布局一致)
+        let dst_path = format!("{}/{}/part.{}", object, fi.data_dir.unwrap_or_default(), new_part_number);
+        let _ = Self::rename_part(
+            &disks_vec,
+            RUSTFS_META_TMP_BUCKET,
+            &tmp_part_path,
+            bucket,
+            &dst_path,
+            part_info_buff.clone().into(),
+            write_quorum,
+        )
+        .await?;
+
+        // 更新内存元数据 fi
+        fi.add_object_part(new_part_number, etag.clone(), w_size, part_info.mod_time, actual_size, part_info.index.clone());
+    fi.size += actual_size; // size 增加 (对象总逻辑大小)
+        // 更新 multipart-style etag: 组合现有所有 part etag
+        let uploaded_parts: Vec<CompletePart> = fi.parts.iter().map(|p| CompletePart { etag: Some(p.etag.clone()), part_num: p.number }).collect();
+        let new_etag = get_complete_multipart_md5(&uploaded_parts);
+        fi.metadata.insert("etag".to_string(), new_etag);
+
+        // 写回 metadata (仅更新 etag/parts/size)
+        // 构造新的 FileInfo 以 update_metadata
+        let mut update_fi = fi.clone();
+        update_fi.metadata = fi.metadata.clone();
+        update_fi.size = fi.size;
+        // 更新所有磁盘 metadata
+        self.update_object_meta(bucket, object, update_fi, disks_vec.as_slice()).await.map_err(|e| to_object_err(e.into(), vec![bucket, object]))?;
 
         Ok(ObjectInfo::from_file_info(&fi, bucket, object, opts.versioned || opts.version_suspended))
     }
