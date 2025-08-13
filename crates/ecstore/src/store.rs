@@ -1996,6 +1996,26 @@ impl StorageAPI for ECStore {
         Err(StorageError::InvalidUploadID(bucket.to_owned(), object.to_owned(), upload_id.to_owned()))
     }
 
+    async fn append_object_part(
+        &self,
+        bucket: &str,
+        object: &str,
+        data: &mut PutObjReader,
+        expected_offset: i64,
+        opts: &ObjectOptions,
+    ) -> Result<ObjectInfo> {
+        let object = encode_dir_object(object);
+        if self.single_pool() {
+            return self.pools[0]
+                .append_object_part(bucket, object.as_str(), data, expected_offset, opts)
+                .await;
+        }
+        let idx = self.get_pool_idx_existing_with_opts(bucket, object.as_str(), opts).await?;
+        self.pools[idx]
+            .append_object_part(bucket, object.as_str(), data, expected_offset, opts)
+            .await
+    }
+
     #[tracing::instrument(skip(self))]
     async fn get_disks(&self, pool_idx: usize, set_idx: usize) -> Result<Vec<Option<DiskStore>>> {
         if pool_idx < self.pools.len() && set_idx < self.pools[pool_idx].disk_set.len() {

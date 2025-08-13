@@ -253,8 +253,9 @@ impl HTTPRangeSpec {
 
         let mut start = self.start;
         if self.is_suffix_length {
-            start = res_size + self.start;
-
+            // For suffix ranges (bytes=-N), start position should be res_size - N.
+            // Here, `len` already accounts for min(N, res_size) from get_length.
+            start = res_size - len;
             if start < 0 {
                 start = 0;
             }
@@ -1084,6 +1085,15 @@ pub trait StorageAPI: ObjectIO {
         uploaded_parts: Vec<CompletePart>,
         opts: &ObjectOptions,
     ) -> Result<ObjectInfo>;
+    // Append new data as a new part without rewriting existing data. expected_offset must equal current size.
+    async fn append_object_part(
+        &self,
+        bucket: &str,
+        object: &str,
+        data: &mut PutObjReader,
+        expected_offset: i64,
+        opts: &ObjectOptions,
+    ) -> Result<ObjectInfo>;
     async fn get_disks(&self, pool_idx: usize, set_idx: usize) -> Result<Vec<Option<DiskStore>>>;
     fn set_drive_counts(&self) -> Vec<usize>;
 
@@ -1444,5 +1454,33 @@ mod tests {
         let n2 = ranged_reader.read(&mut buf2).await.unwrap();
         assert_eq!(n2, 1);
         assert_eq!(&buf2[..1], b"e");
+    }
+
+    #[tokio::test]
+    async fn test_http_range_spec_suffix_range() {
+        // Simulate bytes=-4 on a 10-byte object
+        let total_size = 10i64;
+        let rs = HTTPRangeSpec {
+            is_suffix_length: true,
+            start: 4,
+            end: -1,
+        };
+        let (offset, length) = rs.get_offset_length(total_size).unwrap();
+        assert_eq!(offset, 6);
+        assert_eq!(length, 4);
+    }
+
+    #[tokio::test]
+    async fn test_http_range_spec_regular_range() {
+        // Simulate bytes=3-8 on a 10-byte object => start=3, len=6
+        let total_size = 10i64;
+        let rs = HTTPRangeSpec {
+            is_suffix_length: false,
+            start: 3,
+            end: 8,
+        };
+        let (offset, length) = rs.get_offset_length(total_size).unwrap();
+        assert_eq!(offset, 3);
+        assert_eq!(length, 6);
     }
 }

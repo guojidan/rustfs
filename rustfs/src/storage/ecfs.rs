@@ -154,7 +154,8 @@ impl FS {
         let event_version_id = version_id;
         let Some(body) = body else { return Err(s3_error!(IncompleteBody)) };
 
-        let body = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
+        // Build single stream once
+        let stream_reader = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
 
         // let etag_stream = EtagReader::new(body);
 
@@ -165,10 +166,13 @@ impl FS {
         let ext = ext.to_owned();
 
         // TODO: support zip
-        let decoder = CompressionFormat::from_extension(&ext).get_decoder(body).map_err(|e| {
-            error!("get_decoder err {:?}", e);
-            s3_error!(InvalidArgument, "get_decoder err")
-        })?;
+        // Use the single constructed stream_reader for decoding
+        let decoder = CompressionFormat::from_extension(&ext)
+            .get_decoder(stream_reader)
+            .map_err(|e| {
+                error!("get_decoder err {:?}", e);
+                s3_error!(InvalidArgument, "get_decoder err")
+            })?;
 
         let mut ar = Archive::new(decoder);
         let mut entries = ar.entries().map_err(|e| {
@@ -1415,12 +1419,7 @@ impl S3 for FS {
                 }
             }
         };
-
-        let body = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
-
-        // let body = Box::new(StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string())))));
-
-        // let mut reader = PutObjReader::new(body, content_length as usize);
+        // NOTE: We must only construct the body stream AFTER deciding which path (append vs normal) we take.
 
         let Some(store) = new_object_layer_fn() else {
             return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
@@ -1434,7 +1433,175 @@ impl S3 for FS {
             metadata.insert(AMZ_OBJECT_TAGGING.to_owned(), tags);
         }
 
-        let mut reader: Box<dyn Reader> = Box::new(WarpReader::new(body));
+        // Append early-return branch (x-amz-write-offset-bytes)
+        if let Some(off_hdr) = req.headers.get("x-amz-write-offset-bytes") {
+            if let Ok(off_str) = off_hdr.to_str() {
+                if let Ok(expected_offset) = off_str.parse::<i64>() {
+                    if expected_offset < 0 {
+                        return Err(s3_error!(InvalidArgument, "Invalid x-amz-write-offset-bytes"));
+                    }
+                    if expected_offset > 0 {
+                        // Preflight: check current object size matches expected_offset, return 412 early if not.
+                        // Use get_opts here (read path) to avoid any put-path side effects.
+                        let pre_opts: ObjectOptions = get_opts(&bucket, &key, version_id.clone(), None, &req.headers)
+                            .await
+                            .map_err(ApiError::from)?;
+                        // Only need metadata for size; no body required.
+                        match store.get_object_info(&bucket, &key, &pre_opts).await {
+                            Ok(cur) => {
+                                tracing::debug!(bucket=%bucket, key=%key, expected_offset, current_size=cur.size, "append preflight size check");
+                                if cur.size != expected_offset {
+                                    return Err(s3_error!(PreconditionFailed, "append offset mismatch"));
+                                }
+                                // Optional conditional headers support to protect from ABA
+                                // If-Match: all provided ETags must include current etag; otherwise 412
+                                let strip_quotes = |s: &str| s.trim().trim_matches('"').to_string();
+                                if let Some(hv) = req.headers.get("If-Match") {
+                                    if let Ok(v) = hv.to_str() {
+                                        let v = v.trim();
+                                        if v != "*" {
+                                            let mut any_match = false;
+                                            for part in v.split(',') {
+                                                if strip_quotes(part) == strip_quotes(cur.etag.as_deref().unwrap_or("")) {
+                                                    any_match = true;
+                                                    break;
+                                                }
+                                            }
+                                            if !any_match {
+                                                tracing::debug!(bucket=%bucket, key=%key, etag=?cur.etag, cond=%v, "If-Match precondition failed");
+                                                return Err(s3_error!(PreconditionFailed, "If-Match precondition failed"));
+                                            }
+                                        }
+                                    }
+                                }
+                                // If-None-Match: if any matches (or '*'), precondition failed for PUT
+                                if let Some(hv) = req.headers.get("If-None-Match") {
+                                    if let Ok(v) = hv.to_str() {
+                                        let v = v.trim();
+                                        let cur_etag = strip_quotes(cur.etag.as_deref().unwrap_or(""));
+                                        let mut matched = false;
+                                        if v == "*" {
+                                            matched = true;
+                                        } else {
+                                            for part in v.split(',') {
+                                                if strip_quotes(part) == cur_etag {
+                                                    matched = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if matched {
+                                            tracing::debug!(bucket=%bucket, key=%key, etag=?cur.etag, cond=%v, "If-None-Match precondition failed");
+                                            return Err(s3_error!(PreconditionFailed, "If-None-Match precondition failed"));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // If the object does not exist, report NoSuchKey; otherwise bubble up.
+                                return match e {
+                                    rustfs_ecstore::error::StorageError::ObjectNotFound(_, _) => Err(s3_error!(NoSuchKey)),
+                                    _ => Err(ApiError::from(e).into()),
+                                };
+                            }
+                        }
+
+                        // Build stream only for append path and early return.
+                        if is_compressible(&req.headers, &key)
+                            || req.headers.contains_key("x-amz-server-side-encryption")
+                            || req.headers.contains_key("x-amz-server-side-encryption-customer-key")
+                        {
+                            return Err(s3_error!(NotImplemented, "Append with compression/encryption not supported"));
+                        }
+                        let stream = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
+                        let base_reader: Box<dyn Reader> = Box::new(WarpReader::new(stream));
+                        let hash_reader = HashReader::new(base_reader, size, size, None, false).map_err(ApiError::from)?;
+                        let mut put_reader = PutObjReader::new(hash_reader);
+                        let mt = metadata.clone();
+                        let mt2 = metadata.clone();
+                        let mut opts: ObjectOptions = put_opts(&bucket, &key, version_id.clone(), &req.headers, mt)
+                            .await
+                            .map_err(ApiError::from)?;
+                        let repoptions = get_must_replicate_options(
+                            &mt2,
+                            "",
+                            ReplicationStatusType::Unknown,
+                            ReplicationType::ObjectReplicationType,
+                            &opts,
+                        );
+                        let dsc = must_replicate(&bucket, &key, &repoptions).await;
+                        if dsc.replicate_any() {
+                            let k = format!("{}{}", RESERVED_METADATA_PREFIX_LOWER, "replication-timestamp");
+                            let now: DateTime<Utc> = Utc::now();
+                            opts.user_defined.insert(k, now.to_rfc3339());
+                            let k = format!("{}{}", RESERVED_METADATA_PREFIX_LOWER, "replication-status");
+                            opts.user_defined.insert(k, dsc.pending_status());
+                        }
+                        let obj_info = match store
+                            .append_object_part(&bucket, &key, &mut put_reader, expected_offset, &opts)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let em = e.to_string();
+                                if em.contains("append offset mismatch") {
+                                    return Err(s3_error!(PreconditionFailed, "append offset mismatch"));
+                                } else if em.contains("append not supported for compressed/encrypted object") {
+                                    return Err(s3_error!(
+                                        InvalidRequest,
+                                        "append not supported for compressed/encrypted object"
+                                    ));
+                                } else if em.contains("object has no existing parts") {
+                                    return Err(s3_error!(InvalidRequest, "cannot append to empty object"));
+                                } else if em.contains("not enough disks for append") {
+                                    return Err(s3_error!(ServiceUnavailable, "not enough disks for append"));
+                                } else if em.contains("too many parts") {
+                                    return Err(s3_error!(InvalidRequest, "too many parts"));
+                                } else {
+                                    return Err(ApiError::from(e).into());
+                                }
+                            }
+                        };
+                        let e_tag = obj_info.etag.clone();
+                        let repoptions = get_must_replicate_options(
+                            &mt2,
+                            "",
+                            ReplicationStatusType::Unknown,
+                            ReplicationType::ObjectReplicationType,
+                            &opts,
+                        );
+                        let dsc = must_replicate(&bucket, &key, &repoptions).await;
+                        if dsc.replicate_any() {
+                            if let Some(objectlayer) = new_object_layer_fn() {
+                                schedule_replication(obj_info.clone(), objectlayer, dsc, 1).await;
+                            }
+                        }
+                        let output = PutObjectOutput {
+                            e_tag,
+                            ..Default::default()
+                        };
+                        let event_args = rustfs_notify::event::EventArgs {
+                            event_name: EventName::ObjectCreatedPut,
+                            bucket_name: bucket.clone(),
+                            object: obj_info,
+                            req_params: rustfs_utils::extract_req_params_header(&req.headers),
+                            resp_elements: rustfs_utils::extract_resp_elements(&S3Response::new(output.clone())),
+                            version_id: event_version_id,
+                            host: rustfs_utils::get_request_host(&req.headers),
+                            user_agent: rustfs_utils::get_request_user_agent(&req.headers),
+                        };
+                        tokio::spawn(async move {
+                            rustfs_notify::global::notifier_instance().notify(event_args).await;
+                        });
+                        return Ok(S3Response::new(output));
+                    }
+                }
+            }
+        }
+
+        // Normal put path: construct stream now (body not moved yet)
+        let stream = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
+        let mut reader: Box<dyn Reader> = Box::new(WarpReader::new(stream));
 
         let actual_size = size;
 
@@ -1628,8 +1795,7 @@ impl S3 for FS {
             }
         };
 
-        let body = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
-
+        let stream = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
         // mc cp step 4
 
         let opts = ObjectOptions::default();
@@ -1647,7 +1813,8 @@ impl S3 for FS {
             .user_defined
             .contains_key(format!("{RESERVED_METADATA_PREFIX_LOWER}compression").as_str());
 
-        let mut reader: Box<dyn Reader> = Box::new(WarpReader::new(body));
+        // stream already created above
+        let mut reader: Box<dyn Reader> = Box::new(WarpReader::new(stream));
 
         let actual_size = size;
 

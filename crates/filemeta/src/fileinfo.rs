@@ -390,6 +390,18 @@ impl FileInfo {
             .contains_key(&format!("{RESERVED_METADATA_PREFIX_LOWER}compression"))
     }
 
+    /// Check if the object is encrypted (simple heuristic based on stored metadata keys)
+    pub fn is_encrypted(&self) -> bool {
+        // We treat presence of common SSE metadata keys (either internal reserved or direct) as encrypted.
+        let keys = [
+            "x-amz-server-side-encryption",
+            "x-amz-server-side-encryption-customer-key",
+            &format!("{RESERVED_METADATA_PREFIX_LOWER}server-side-encryption"),
+            &format!("{RESERVED_METADATA_PREFIX_LOWER}server-side-encryption-customer-key"),
+        ];
+        keys.iter().any(|k| self.metadata.contains_key(*k))
+    }
+
     /// Check if the object is remote (transitioned to another tier)
     pub fn is_remote(&self) -> bool {
         !self.transition_tier.is_empty()
