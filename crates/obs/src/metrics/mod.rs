@@ -31,6 +31,7 @@ pub(crate) mod system_cpu;
 pub(crate) mod system_drive;
 pub(crate) mod system_memory;
 pub(crate) mod system_network;
+pub mod system_numa;
 pub(crate) mod system_process;
 
 pub use entry::descriptor::MetricDescriptor;

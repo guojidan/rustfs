@@ -8163,6 +8163,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "lazy_static",
+ "libc",
+ "nix 0.30.1",
+ "num_cpus",
  "path-clean",
  "rmp-serde",
  "rustfs-filemeta",
@@ -8171,6 +8174,7 @@ dependencies = [
  "serde",
  "tokio",
  "tonic 0.14.0",
+ "tracing",
  "uuid",
 ]
 

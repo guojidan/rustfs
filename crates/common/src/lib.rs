@@ -19,6 +19,7 @@ pub mod globals;
 pub mod heal_channel;
 pub mod last_minute;
 pub mod metrics;
+pub mod numa;
 
 // is ','
 pub static DEFAULT_DELIMITER: u8 = 44;

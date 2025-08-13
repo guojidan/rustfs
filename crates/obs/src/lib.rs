@@ -64,4 +64,5 @@ pub use global::*;
 pub use logger::Logger;
 pub use logger::{get_global_logger, init_global_logger, start_logger};
 pub use logger::{log_debug, log_error, log_info, log_trace, log_warn, log_with_context};
+pub use metrics::system_numa;
 pub use system::SystemObserver;

@@ -40,3 +40,10 @@ path-clean = { workspace = true }
 rmp-serde = { workspace = true }
 async-trait = { workspace = true }
 s3s = { workspace = true }
+tracing = { workspace = true }
+num_cpus = { workspace = true }
+libc = "0.2"
+
+# Use nix for safe CPU affinity on Linux
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30.1", features = ["sched"] }

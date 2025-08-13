@@ -31,6 +31,7 @@ pub enum MetricSubsystem {
     SystemMemory,
     SystemCpu,
     SystemProcess,
+    SystemNuma,
 
     // debug related subsystems
     DebugGo,
@@ -72,6 +73,7 @@ impl MetricSubsystem {
             Self::SystemMemory => "/system/memory",
             Self::SystemCpu => "/system/cpu",
             Self::SystemProcess => "/system/process",
+            Self::SystemNuma => "/system/numa",
 
             // debug related subsystems
             Self::DebugGo => "/debug/go",
@@ -119,6 +121,7 @@ impl MetricSubsystem {
             "/system/memory" => Self::SystemMemory,
             "/system/cpu" => Self::SystemCpu,
             "/system/process" => Self::SystemProcess,
+            "/system/numa" => Self::SystemNuma,
 
             // Debug related subsystems
             "/debug/go" => Self::DebugGo,
@@ -186,6 +189,7 @@ pub mod subsystems {
     pub const SYSTEM_MEMORY: MetricSubsystem = MetricSubsystem::SystemMemory;
     pub const SYSTEM_CPU: MetricSubsystem = MetricSubsystem::SystemCpu;
     pub const SYSTEM_PROCESS: MetricSubsystem = MetricSubsystem::SystemProcess;
+    pub const SYSTEM_NUMA: MetricSubsystem = MetricSubsystem::SystemNuma;
     pub const DEBUG_GO: MetricSubsystem = MetricSubsystem::DebugGo;
     pub const CLUSTER_HEALTH: MetricSubsystem = MetricSubsystem::ClusterHealth;
     pub const CLUSTER_USAGE_OBJECTS: MetricSubsystem = MetricSubsystem::ClusterUsageObjects;

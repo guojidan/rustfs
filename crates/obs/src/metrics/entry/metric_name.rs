@@ -326,7 +326,18 @@ pub enum MetricName {
     InternodeSentBytesTotal,
     InternodeRecvBytesTotal,
 
-    // Process-related metrics
+    // NUMA topology and affinity metrics
+    NumaTopologyNodesTotal,
+    NumaTopologyEnabled,
+    NumaAffinityBindsTotal,
+    NumaAffinityBindsErrors,
+    NumaPrewarmSuccess,
+    NumaPrewarmErrors,
+    NumaMemorySize,
+    NumaMemoryAvailable,
+    NumaCurrentNode,
+
+    // Metrics related to the process
     ProcessLocksReadTotal,
     ProcessLocksWriteTotal,
     ProcessCPUTotalSeconds,
@@ -642,6 +653,17 @@ impl MetricName {
             Self::InternodeDialAvgTimeNanos => "dial_avg_time_nanos".to_string(),
             Self::InternodeSentBytesTotal => "sent_bytes_total".to_string(),
             Self::InternodeRecvBytesTotal => "recv_bytes_total".to_string(),
+
+            // NUMA topology and affinity metrics
+            Self::NumaTopologyNodesTotal => "topology_nodes_total".to_string(),
+            Self::NumaTopologyEnabled => "topology_enabled".to_string(),
+            Self::NumaAffinityBindsTotal => "affinity_binds_total".to_string(),
+            Self::NumaAffinityBindsErrors => "affinity_binds_errors".to_string(),
+            Self::NumaPrewarmSuccess => "prewarm_success".to_string(),
+            Self::NumaPrewarmErrors => "prewarm_errors".to_string(),
+            Self::NumaMemorySize => "memory_size".to_string(),
+            Self::NumaMemoryAvailable => "memory_available".to_string(),
+            Self::NumaCurrentNode => "current_node".to_string(),
 
             // Process-related metrics
             Self::ProcessLocksReadTotal => "locks_read_total".to_string(),

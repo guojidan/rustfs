@@ -79,8 +79,38 @@ pub struct Opt {
     #[arg(long, env = "RUSTFS_LICENSE")]
     pub license: Option<String>,
 
+    /// Region identifier.
     #[arg(long, env = "RUSTFS_REGION")]
     pub region: Option<String>,
+
+    /// Enable NUMA CPU affinity (Linux only). Default: false. Can be overridden by env RUSTFS_ENABLE_NUMA_AFFINITY=true
+    #[cfg_attr(
+        target_os = "linux",
+        arg(long, default_value_t = false, env = "RUSTFS_ENABLE_NUMA_AFFINITY")
+    )]
+    #[cfg_attr(not(target_os = "linux"), doc = "Non-Linux builds will ignore this flag.")]
+    pub enable_numa_affinity: bool,
+
+    /// Enable jemalloc NUMA-aware tuning (Linux only). Default: false. Can be overridden by env RUSTFS_ENABLE_NUMA_JEMALLOC=true
+    #[cfg_attr(
+        target_os = "linux",
+        arg(long, default_value_t = false, env = "RUSTFS_ENABLE_NUMA_JEMALLOC")
+    )]
+    #[cfg_attr(not(target_os = "linux"), doc = "Non-Linux builds will ignore this flag.")]
+    pub enable_numa_jemalloc: bool,
+
+    /// Enable memory prewarm on NUMA nodes (Linux only). Default: false. Can be overridden by env RUSTFS_ENABLE_NUMA_PREWARM=true
+    #[cfg_attr(target_os = "linux", arg(long, default_value_t = false, env = "RUSTFS_ENABLE_NUMA_PREWARM"))]
+    #[cfg_attr(not(target_os = "linux"), doc = "Non-Linux builds will ignore this flag.")]
+    pub enable_numa_prewarm: bool,
+
+    /// Enable NUMA-aware runtime tuning for worker threads (Linux only). Default: false. Can be overridden by env RUSTFS_ENABLE_NUMA_RUNTIME_TUNING=true
+    #[cfg_attr(
+        target_os = "linux",
+        arg(long, default_value_t = false, env = "RUSTFS_ENABLE_NUMA_RUNTIME_TUNING")
+    )]
+    #[cfg_attr(not(target_os = "linux"), doc = "Non-Linux builds will ignore this flag.")]
+    pub enable_numa_runtime_tuning: bool,
 }
 
 // lazy_static::lazy_static! {
