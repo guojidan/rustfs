@@ -3,8 +3,8 @@
 // Licensed under the Apache License, Version 2.0
 
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{Credentials, Region};
 use bytes::Bytes;
 use serial_test::serial;
 use std::error::Error;
@@ -74,11 +74,9 @@ async fn test_put_object_append_success() -> Result<(), Box<dyn std::error::Erro
         .customize()
         .mutate_request(move |req| {
             use http::header::HeaderValue;
-            req.headers_mut().insert(
-                "x-amz-write-offset-bytes",
-                HeaderValue::from_str(&offset.to_string()).unwrap(),
-            );
-    })
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&offset.to_string()).unwrap());
+        })
         .send()
         .await?;
 
@@ -127,18 +125,36 @@ async fn test_put_object_append_offset_mismatch() -> Result<(), Box<dyn std::err
         .customize()
         .mutate_request(move |req| {
             use http::header::HeaderValue;
-            req.headers_mut().insert(
-                "x-amz-write-offset-bytes",
-                HeaderValue::from_str(&wrong_offset.to_string()).unwrap(),
-            );
-    })
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&wrong_offset.to_string()).unwrap());
+        })
         .send()
         .await;
 
     assert!(result.is_err(), "expected offset mismatch error");
     if let Err(e) = result {
         let es = e.to_string();
-        assert!(es.contains("PreconditionFailed") || es.contains("append offset mismatch"), "unexpected error: {es}");
+        let mut ok = es.contains("PreconditionFailed") || es.contains("append offset mismatch");
+        // Prefer structured check from SDK if available
+        #[allow(unused_mut)]
+        let mut code_msg = String::new();
+        if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+            let meta = se.err().meta();
+            if let Some(code) = meta.code() {
+                code_msg.push_str(code);
+            }
+            if let Some(msg) = meta.message() {
+                if !code_msg.is_empty() {
+                    code_msg.push_str(": ");
+                }
+                code_msg.push_str(msg);
+            }
+            if !ok {
+                ok = code_msg.contains("PreconditionFailed") || code_msg.contains("append offset mismatch");
+            }
+        }
+        assert!(ok, "unexpected error: es={es}, meta={code_msg}");
+        println!("ex: {}, code_msg: {}, e: {:?}", es, code_msg, e);
     }
 
     // Ensure content not modified
@@ -154,6 +170,244 @@ async fn test_put_object_append_offset_mismatch() -> Result<(), Box<dyn std::err
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 #[ignore = "requires running RustFS server at localhost:9000"]
+async fn test_put_object_append_offset_too_large() -> Result<(), Box<dyn std::error::Error>> {
+    let client = create_aws_s3_client().await?;
+    setup_test_bucket(&client).await?;
+    let key = "append-offset-too-large.txt";
+
+    let data1 = b"abc".to_vec();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data1.clone()).into())
+        .send()
+        .await?;
+
+    // Offset larger than current size (3 + 5)
+    let wrong_offset = data1.len() + 5;
+    let data2 = b"XYZ".to_vec();
+    let result = client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data2.clone()).into())
+        .customize()
+        .mutate_request(move |req| {
+            use http::header::HeaderValue;
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&wrong_offset.to_string()).unwrap());
+        })
+        .send()
+        .await;
+
+    assert!(result.is_err(), "expected offset too large error");
+    if let Err(e) = result {
+        let es = e.to_string();
+        let mut ok = es.contains("PreconditionFailed") || es.contains("append offset mismatch");
+        let mut code_msg = String::new();
+        if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+            let meta = se.err().meta();
+            if let Some(code) = meta.code() {
+                code_msg.push_str(code);
+            }
+            if let Some(msg) = meta.message() {
+                if !code_msg.is_empty() {
+                    code_msg.push_str(": ");
+                }
+                code_msg.push_str(msg);
+            }
+            if !ok {
+                ok = code_msg.contains("PreconditionFailed") || code_msg.contains("append offset mismatch");
+            }
+        }
+        assert!(ok, "unexpected error: es={es}, meta={code_msg}");
+    }
+
+    // Ensure original content unchanged
+    let get_resp = client.get_object().bucket(BUCKET).key(key).send().await?;
+    let mut reader = get_resp.body.into_async_read();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    assert_eq!(buf, b"abc");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+#[ignore = "requires running RustFS server at localhost:9000"]
+async fn test_put_object_append_multiple_times() -> Result<(), Box<dyn std::error::Error>> {
+    let client = create_aws_s3_client().await?;
+    setup_test_bucket(&client).await?;
+    let key = "append-multi.txt";
+
+    let part1 = b"one".to_vec();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(part1.clone()).into())
+        .send()
+        .await?;
+
+    let part2 = b"two".to_vec();
+    let off2 = part1.len();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(part2.clone()).into())
+        .customize()
+        .mutate_request(move |req| {
+            use http::header::HeaderValue;
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&off2.to_string()).unwrap());
+        })
+        .send()
+        .await?;
+
+    let part3 = b"three".to_vec();
+    let off3 = part1.len() + part2.len();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(part3.clone()).into())
+        .customize()
+        .mutate_request(move |req| {
+            use http::header::HeaderValue;
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&off3.to_string()).unwrap());
+        })
+        .send()
+        .await?;
+
+    let get_resp = client.get_object().bucket(BUCKET).key(key).send().await?;
+    let etag_opt = get_resp.e_tag().map(|s| s.to_string());
+    let mut reader = get_resp.body.into_async_read();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    assert_eq!(buf, b"onetwothree");
+    if let Some(etag) = etag_opt.as_ref() {
+        assert!(etag.contains("-3"), "expected composite ETag with -3 suffix, got {etag}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+#[ignore = "requires running RustFS server at localhost:9000"]
+async fn test_put_object_with_offset_zero_overwrites() -> Result<(), Box<dyn std::error::Error>> {
+    let client = create_aws_s3_client().await?;
+    setup_test_bucket(&client).await?;
+    let key = "append-offset-zero-overwrite.txt";
+
+    // Initial object
+    let data1 = b"AAAA".to_vec();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data1.clone()).into())
+        .send()
+        .await?;
+
+    // Send header with offset=0 — should go through normal put path (overwrite)
+    let data2 = b"BBBBBB".to_vec();
+    let result = client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data2.clone()).into())
+        .customize()
+        .mutate_request(move |req| {
+            use http::header::HeaderValue;
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_static("0"));
+        })
+        .send()
+        .await;
+
+    assert!(result.is_ok(), "offset=0 should not trigger append failure");
+
+    // Verify content overwritten (not appended)
+    let get_resp = client.get_object().bucket(BUCKET).key(key).send().await?;
+    let mut reader = get_resp.body.into_async_read();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    assert_eq!(buf, b"BBBBBB");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+#[ignore = "requires running RustFS server at localhost:9000"]
+async fn test_put_object_append_header_invalid() -> Result<(), Box<dyn std::error::Error>> {
+    let client = create_aws_s3_client().await?;
+    setup_test_bucket(&client).await?;
+    let key = "append-header-invalid.txt";
+
+    let data1 = b"abc".to_vec();
+    client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data1.clone()).into())
+        .send()
+        .await?;
+
+    let data2 = b"zzz".to_vec();
+    let result = client
+        .put_object()
+        .bucket(BUCKET)
+        .key(key)
+        .body(Bytes::from(data2.clone()).into())
+        .customize()
+        .mutate_request(|req| {
+            use http::header::HeaderValue;
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_static("bad"));
+        })
+        .send()
+        .await;
+
+    assert!(result.is_err(), "invalid header should error");
+    if let Err(e) = result {
+        let es = e.to_string();
+        let mut ok = es.contains("InvalidArgument") || es.contains("Invalid x-amz-write-offset-bytes");
+        // Prefer structured check from SDK if available
+        #[allow(unused_mut)]
+        let mut code_msg = String::new();
+        if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+            let meta = se.err().meta();
+            if let Some(code) = meta.code() {
+                code_msg.push_str(code);
+            }
+            if let Some(msg) = meta.message() {
+                if !code_msg.is_empty() {
+                    code_msg.push_str(": ");
+                }
+                code_msg.push_str(msg);
+            }
+            if !ok {
+                ok = code_msg.contains("InvalidArgument") || code_msg.contains("Invalid x-amz-write-offset-bytes");
+            }
+        }
+        assert!(ok, "unexpected error for invalid header: es={es}, meta={code_msg}");
+    }
+
+    // Ensure original content unchanged
+    let get_resp = client.get_object().bucket(BUCKET).key(key).send().await?;
+    let mut reader = get_resp.body.into_async_read();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    assert_eq!(buf, b"abc");
+    Ok(())
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+#[ignore = "requires running RustFS server at localhost:9000"]
 async fn test_put_object_append_encryption_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let client = create_aws_s3_client().await?;
     setup_test_bucket(&client).await?;
@@ -164,7 +418,7 @@ async fn test_put_object_append_encryption_rejected() -> Result<(), Box<dyn std:
     client
         .put_object()
         .bucket(BUCKET)
-    .key(key)
+        .key(key)
         .body(Bytes::from(data1.clone()).into())
         .send()
         .await?;
@@ -175,27 +429,41 @@ async fn test_put_object_append_encryption_rejected() -> Result<(), Box<dyn std:
     let result = client
         .put_object()
         .bucket(BUCKET)
-    .key(key)
+        .key(key)
         .body(Bytes::from(data2.clone()).into())
         .customize()
         .mutate_request(move |req| {
             use http::header::HeaderValue;
-            req.headers_mut().insert(
-                "x-amz-write-offset-bytes",
-                HeaderValue::from_str(&offset.to_string()).unwrap(),
-            );
-            req.headers_mut().insert(
-                "x-amz-server-side-encryption",
-                HeaderValue::from_static("AES256"),
-            );
-    })
+            req.headers_mut()
+                .insert("x-amz-write-offset-bytes", HeaderValue::from_str(&offset.to_string()).unwrap());
+            req.headers_mut()
+                .insert("x-amz-server-side-encryption", HeaderValue::from_static("AES256"));
+        })
         .send()
         .await;
 
     assert!(result.is_err(), "expected encryption append rejection");
     if let Err(e) = result {
         let es = e.to_string();
-        assert!(es.contains("NotImplemented") || es.contains("Append with compression/encryption not supported"), "unexpected error: {es}");
+        let mut ok = es.contains("NotImplemented") || es.contains("Append with compression/encryption not supported");
+        #[allow(unused_mut)]
+        let mut code_msg = String::new();
+        if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+            let meta = se.err().meta();
+            if let Some(code) = meta.code() {
+                code_msg.push_str(code);
+            }
+            if let Some(msg) = meta.message() {
+                if !code_msg.is_empty() {
+                    code_msg.push_str(": ");
+                }
+                code_msg.push_str(msg);
+            }
+            if !ok {
+                ok = code_msg.contains("NotImplemented") || code_msg.contains("Append with compression/encryption not supported");
+            }
+        }
+        assert!(ok, "unexpected error: es={es}, meta={code_msg}");
     }
 
     // Ensure object unchanged

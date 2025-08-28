@@ -2122,8 +2122,10 @@ impl SetDisks {
             let mut readers = Vec::with_capacity(disks.len());
             let mut errors = Vec::with_capacity(disks.len());
             for (idx, disk_op) in disks.iter().enumerate() {
+                // Only use inline data for the first part; appended parts must be read from disk
+                let inline_data = if part_number == 1 { files[idx].data.as_deref() } else { None };
                 match create_bitrot_reader(
-                    files[idx].data.as_deref(),
+                    inline_data,
                     disk_op.as_ref(),
                     bucket,
                     &format!("{}/{}/part.{}", object, files[idx].data_dir.unwrap_or_default(), part_number),
@@ -3528,9 +3530,15 @@ impl ObjectIO for SetDisks {
             //  get content-type
         }
 
+        // Resolve logical (unencoded) size. For non-compressed objects this should be content length.
+        // For compressed objects, we keep encoded size in fi.parts[i].size and fi.size for RS math.
         let mut actual_size = data.actual_size();
         if actual_size < 0 {
-            let is_compressed = fi.is_compressed();
+            // Fallback only for non-compressed streams
+            let is_compressed = {
+                // we haven't assigned fi.metadata yet, check user_defined directly
+                user_defined.contains_key(&format!("{RESERVED_METADATA_PREFIX_LOWER}compression"))
+            };
             if !is_compressed {
                 actual_size = w_size as i64;
             }
@@ -3544,6 +3552,9 @@ impl ObjectIO for SetDisks {
 
         let now = OffsetDateTime::now_utc();
 
+        // Decide whether this object is compressed based on user metadata we are about to set
+        let is_compressed = user_defined.contains_key(&format!("{RESERVED_METADATA_PREFIX_LOWER}compression"));
+
         for (i, fi) in parts_metadatas.iter_mut().enumerate() {
             fi.metadata = user_defined.clone();
             if is_inline_buffer {
@@ -3555,9 +3566,12 @@ impl ObjectIO for SetDisks {
             }
 
             fi.mod_time = Some(now);
-            fi.size = w_size as i64;
+            // Store object logical size for non-compressed objects, encoded size for compressed ones
+            fi.size = if is_compressed { w_size as i64 } else { actual_size };
             fi.versioned = opts.versioned || opts.version_suspended;
-            fi.add_object_part(1, etag.clone(), w_size, fi.mod_time, actual_size, index_op.clone());
+            // Part.size follows the same rule as fi.size for correct erasure math in read path
+            let part_size = if is_compressed { w_size } else { actual_size.max(0) as usize };
+            fi.add_object_part(1, etag.clone(), part_size, fi.mod_time, actual_size, index_op.clone());
 
             if opts.data_movement {
                 fi.set_data_moved();
@@ -4729,7 +4743,7 @@ impl StorageAPI for SetDisks {
 
         // fi.parts = vec![part_info.clone()];
 
-    let part_info_buff = part_info.marshal_msg()?;
+        let part_info_buff = part_info.marshal_msg()?;
 
         drop(writers); // drop writers to close all files
 
@@ -5420,7 +5434,7 @@ impl StorageAPI for SetDisks {
         Ok(ObjectInfo::from_file_info(&fi, bucket, object, opts.versioned || opts.version_suspended))
     }
 
-    #[tracing::instrument(level="debug", skip(self, data, opts))]
+    #[tracing::instrument(level = "debug", skip(self, data, opts))]
     async fn append_object_part(
         &self,
         bucket: &str,
@@ -5438,8 +5452,8 @@ impl StorageAPI for SetDisks {
         if fi.parts.is_empty() {
             return Err(Error::other("object has no existing parts (cannot append to empty)"));
         }
-    // 仅支持未压缩未加密 (通过元数据关键字简单判断加密)
-    if fi.is_compressed() || fi.metadata.keys().any(|k| k.contains("server-side-encryption")) {
+        // 仅支持未压缩未加密 (通过元数据关键字简单判断加密)
+        if fi.is_compressed() || fi.metadata.keys().any(|k| k.contains("server-side-encryption")) {
             return Err(Error::other("append not supported for compressed/encrypted object (state)"));
         }
 
@@ -5471,7 +5485,8 @@ impl StorageAPI for SetDisks {
                     erasure.shard_file_size(data.size()),
                     erasure.shard_size(),
                     HashAlgorithm::HighwayHash256,
-                ).await?;
+                )
+                .await?;
                 writers.push(Some(writer));
                 errors.push(None);
             } else {
@@ -5483,7 +5498,10 @@ impl StorageAPI for SetDisks {
         if ok_writers < write_quorum {
             return Err(Error::other("not enough disks for append"));
         }
-        let stream = mem::replace(&mut data.stream, HashReader::new(Box::new(WarpReader::new(Cursor::new(Vec::new()))), 0, 0, None, false)?);
+        let stream = mem::replace(
+            &mut data.stream,
+            HashReader::new(Box::new(WarpReader::new(Cursor::new(Vec::new()))), 0, 0, None, false)?,
+        );
         let (reader, w_size) = Arc::new(erasure).encode(stream, &mut writers, write_quorum).await?;
         let _ = mem::replace(&mut data.stream, reader);
         if (w_size as i64) < data.size() {
@@ -5492,8 +5510,23 @@ impl StorageAPI for SetDisks {
         let index_op = data.stream.try_get_index().map(|v| v.clone().into_vec());
         let etag = data.stream.try_resolve_etag().unwrap_or_default();
         let mut actual_size = data.actual_size();
-        if actual_size < 0 { actual_size = w_size as i64; }
-        let part_info = ObjectPartInfo { etag: etag.clone(), number: new_part_number, size: w_size, mod_time: Some(OffsetDateTime::now_utc()), actual_size, index: index_op, ..Default::default() };
+        if actual_size < 0 {
+            actual_size = w_size as i64;
+        }
+        // Respect compression semantics: for compressed objects, store encoded size in part.size
+        let is_compressed = fi.is_compressed();
+        let logical_part_size = actual_size.max(0) as usize;
+        let stored_part_size = if is_compressed { w_size } else { logical_part_size };
+        let part_info = ObjectPartInfo {
+            etag: etag.clone(),
+            number: new_part_number,
+            // 使用逻辑大小（未压缩）或编码大小（压缩）记录 part.size
+            size: stored_part_size,
+            mod_time: Some(OffsetDateTime::now_utc()),
+            actual_size,
+            index: index_op,
+            ..Default::default()
+        };
         let part_info_buff = part_info.marshal_msg()?;
         drop(writers);
 
@@ -5512,20 +5545,51 @@ impl StorageAPI for SetDisks {
         .await?;
 
         // 更新内存元数据 fi
-        fi.add_object_part(new_part_number, etag.clone(), w_size, part_info.mod_time, actual_size, part_info.index.clone());
-    fi.size += actual_size; // size 增加 (对象总逻辑大小)
+        fi.add_object_part(
+            new_part_number,
+            etag.clone(),
+            stored_part_size,
+            part_info.mod_time,
+            actual_size,
+            part_info.index.clone(),
+        );
+        // size 增加：未压缩增逻辑大小；压缩增编码大小（保持与初始 put 一致）
+        fi.size += if is_compressed { w_size as i64 } else { actual_size };
         // 更新 multipart-style etag: 组合现有所有 part etag
-        let uploaded_parts: Vec<CompletePart> = fi.parts.iter().map(|p| CompletePart { etag: Some(p.etag.clone()), part_num: p.number }).collect();
+        let uploaded_parts: Vec<CompletePart> = fi
+            .parts
+            .iter()
+            .map(|p| CompletePart {
+                etag: Some(p.etag.clone()),
+                part_num: p.number,
+            })
+            .collect();
         let new_etag = get_complete_multipart_md5(&uploaded_parts);
         fi.metadata.insert("etag".to_string(), new_etag);
 
-        // 写回 metadata (仅更新 etag/parts/size)
-        // 构造新的 FileInfo 以 update_metadata
-        let mut update_fi = fi.clone();
-        update_fi.metadata = fi.metadata.clone();
-        update_fi.size = fi.size;
-        // 更新所有磁盘 metadata
-        self.update_object_meta(bucket, object, update_fi, disks_vec.as_slice()).await.map_err(|e| to_object_err(e.into(), vec![bucket, object]))?;
+        // 写回 metadata：需要把新的 parts/size/etag 持久化到对象的版本元数据
+        // 仅调用 update_object_meta 只更新 meta_user，无法更新 parts 列表，导致读路径看不到新增 part。
+        // 这里采用与 complete_multipart_upload 类似的持久化方式：对每个磁盘写入包含最新 parts 的 FileInfo。
+        let write_quorum = fi.write_quorum(self.default_write_quorum());
+        // 统一版本时间与标志，确保各盘选择同一有效版本
+        let now = OffsetDateTime::now_utc();
+        fi.mod_time = Some(now);
+        fi.versioned = opts.versioned || opts.version_suspended;
+        fi.fresh = false;
+        // 基于当前在线磁盘，构造 per-disk FileInfo（设置 erasure.index）并写入
+        let mut parts_metadatas = vec![fi.clone(); disks_vec.len()];
+        for (i, pfi) in parts_metadatas.iter_mut().enumerate() {
+            if pfi.erasure.index == 0 {
+                pfi.erasure.index = i + 1;
+            }
+            pfi.mod_time = Some(now);
+            pfi.versioned = opts.versioned || opts.version_suspended;
+            pfi.fresh = false;
+            // 已在 fi 中更新了 parts/size/etag/metadata，这里逐盘同步
+        }
+        Self::write_unique_file_info(&disks_vec, "", bucket, object, &parts_metadatas, write_quorum)
+            .await
+            .map_err(|e| to_object_err(e.into(), vec![bucket, object]))?;
 
         Ok(ObjectInfo::from_file_info(&fi, bucket, object, opts.versioned || opts.version_suspended))
     }
