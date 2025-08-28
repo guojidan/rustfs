@@ -1449,8 +1449,52 @@ impl S3 for FS {
                         // Only need metadata for size; no body required.
                         match store.get_object_info(&bucket, &key, &pre_opts).await {
                             Ok(cur) => {
+                                tracing::debug!(bucket=%bucket, key=%key, expected_offset, current_size=cur.size, "append preflight size check");
                                 if cur.size != expected_offset {
                                     return Err(s3_error!(PreconditionFailed, "append offset mismatch"));
+                                }
+                                // Optional conditional headers support to protect from ABA
+                                // If-Match: all provided ETags must include current etag; otherwise 412
+                                let strip_quotes = |s: &str| s.trim().trim_matches('"').to_string();
+                                if let Some(hv) = req.headers.get("If-Match") {
+                                    if let Ok(v) = hv.to_str() {
+                                        let v = v.trim();
+                                        if v != "*" {
+                                            let mut any_match = false;
+                                            for part in v.split(',') {
+                                                if strip_quotes(part) == strip_quotes(cur.etag.as_deref().unwrap_or("")) {
+                                                    any_match = true;
+                                                    break;
+                                                }
+                                            }
+                                            if !any_match {
+                                                tracing::debug!(bucket=%bucket, key=%key, etag=?cur.etag, cond=%v, "If-Match precondition failed");
+                                                return Err(s3_error!(PreconditionFailed, "If-Match precondition failed"));
+                                            }
+                                        }
+                                    }
+                                }
+                                // If-None-Match: if any matches (or '*'), precondition failed for PUT
+                                if let Some(hv) = req.headers.get("If-None-Match") {
+                                    if let Ok(v) = hv.to_str() {
+                                        let v = v.trim();
+                                        let cur_etag = strip_quotes(cur.etag.as_deref().unwrap_or(""));
+                                        let mut matched = false;
+                                        if v == "*" {
+                                            matched = true;
+                                        } else {
+                                            for part in v.split(',') {
+                                                if strip_quotes(part) == cur_etag {
+                                                    matched = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if matched {
+                                            tracing::debug!(bucket=%bucket, key=%key, etag=?cur.etag, cond=%v, "If-None-Match precondition failed");
+                                            return Err(s3_error!(PreconditionFailed, "If-None-Match precondition failed"));
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1509,6 +1553,10 @@ impl S3 for FS {
                                     ));
                                 } else if em.contains("object has no existing parts") {
                                     return Err(s3_error!(InvalidRequest, "cannot append to empty object"));
+                                } else if em.contains("not enough disks for append") {
+                                    return Err(s3_error!(ServiceUnavailable, "not enough disks for append"));
+                                } else if em.contains("too many parts") {
+                                    return Err(s3_error!(InvalidRequest, "too many parts"));
                                 } else {
                                     return Err(ApiError::from(e).into());
                                 }

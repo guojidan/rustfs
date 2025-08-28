@@ -5434,7 +5434,7 @@ impl StorageAPI for SetDisks {
         Ok(ObjectInfo::from_file_info(&fi, bucket, object, opts.versioned || opts.version_suspended))
     }
 
-    #[tracing::instrument(level = "debug", skip(self, data, opts))]
+    #[tracing::instrument(level = "debug", skip(self, data, opts), fields(bucket=%bucket, object=%object, expected_offset))]
     async fn append_object_part(
         &self,
         bucket: &str,
@@ -5443,14 +5443,32 @@ impl StorageAPI for SetDisks {
         expected_offset: i64,
         opts: &ObjectOptions,
     ) -> Result<ObjectInfo> {
+        // Acquire per-object exclusive lock via RAII guard. It auto-releases asynchronously on drop.
+        let mut _object_lock_guard: Option<rustfs_lock::LockGuard> = None;
+        if !opts.no_lock {
+            let guard_opt = self
+                .namespace_lock
+                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
+                .await?;
+            if guard_opt.is_none() {
+                return Err(Error::other("can not get lock. please retry".to_string()));
+            }
+            _object_lock_guard = guard_opt;
+        }
+
         // 获取现有对象信息
         let (mut fi, files_metas, disks) = self.get_object_fileinfo(bucket, object, opts, false).await?;
         if fi.size != expected_offset {
+            tracing::warn!(current_size = fi.size, expected_offset, "append offset mismatch");
             // front layer maps this specific phrase to PreconditionFailed
             return Err(Error::other("append offset mismatch: expected current size"));
         }
         if fi.parts.is_empty() {
             return Err(Error::other("object has no existing parts (cannot append to empty)"));
+        }
+        // Protect against unbounded parts growth
+        if fi.parts.len() >= MAX_PARTS_COUNT {
+            return Err(Error::other("too many parts"));
         }
         // 仅支持未压缩未加密 (通过元数据关键字简单判断加密)
         if fi.is_compressed() || fi.metadata.keys().any(|k| k.contains("server-side-encryption")) {
@@ -5496,6 +5514,7 @@ impl StorageAPI for SetDisks {
         }
         let ok_writers = errors.iter().filter(|e| e.is_none()).count();
         if ok_writers < write_quorum {
+            tracing::error!(ok_writers, write_quorum, "not enough disks for append");
             return Err(Error::other("not enough disks for append"));
         }
         let stream = mem::replace(
