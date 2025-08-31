@@ -23,7 +23,7 @@ pub mod io_monitor;
 pub mod io_throttler;
 pub mod stats_aggregator;
 
-pub use data_scanner::Scanner;
+pub use data_scanner::{Scanner, ScannerConfig, ScanMode, ScannerState};
 pub use metrics::ScannerMetrics;
 pub use node_scanner::{NodeScanner, NodeScannerConfig, LocalScanStats, LoadLevel, IOMonitor, IOThrottler};
 pub use checkpoint::{CheckpointManager, CheckpointData, CheckpointInfo};

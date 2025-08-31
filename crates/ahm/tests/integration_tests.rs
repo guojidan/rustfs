@@ -14,11 +14,12 @@
 
 use std::{sync::Arc, time::Duration};
 use tempfile::TempDir;
-use tokio::time::timeout;
 
 use rustfs_ahm::scanner::{
     node_scanner::{LoadLevel, NodeScanner, NodeScannerConfig},
     stats_aggregator::{DecentralizedStatsAggregator, DecentralizedStatsAggregatorConfig, NodeInfo},
+    io_throttler::MetricsSnapshot,
+    local_stats::StatsSummary,
 };
 
 mod scanner_optimization_tests;
@@ -82,7 +83,7 @@ async fn test_load_balancing_and_throttling_integration() {
         let current_level = io_monitor.get_business_load_level().await;
 
         // 获取限流决策
-        let metrics_snapshot = super::scanner_optimization_tests::io_throttler::MetricsSnapshot {
+        let metrics_snapshot = MetricsSnapshot {
             iops: 100 + qps / 10,
             latency,
             cpu_usage: std::cmp::min(50 + (qps / 20) as u8, 100),
@@ -128,12 +129,7 @@ async fn test_checkpoint_resume_functionality() {
     scanner1.initialize_stats().await.unwrap();
     
     // 模拟扫描进度
-    {
-        let mut progress = scanner1.scan_progress.write().await;
-        progress.current_cycle = 3;
-        progress.current_disk_index = 1;
-        progress.last_scan_key = Some("checkpoint-test-key".to_string());
-    }
+    scanner1.update_scan_progress_for_test(3, 1, Some("checkpoint-test-key".to_string())).await;
 
     // 保存检查点
     scanner1.force_save_checkpoint().await.unwrap();
@@ -201,7 +197,7 @@ async fn test_distributed_stats_aggregation() {
     }
 
     // 设置本地统计（模拟本地节点）
-    let local_stats = super::scanner_optimization_tests::local_stats::StatsSummary {
+    let local_stats = StatsSummary {
         node_id: "local-node".to_string(),
         total_objects_scanned: 1000,
         total_healthy_objects: 950,

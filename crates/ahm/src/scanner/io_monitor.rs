@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use std::{
-    collections::{HashMap, VecDeque},
-    path::Path,
+    collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, SystemTime},
@@ -28,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::node_scanner::LoadLevel;
-use crate::{error::Result, Error};
+use crate::error::Result;
 
 /// IO 监控配置
 #[derive(Debug, Clone)]
@@ -267,8 +266,10 @@ impl AdvancedIOMonitor {
         // TODO: 实现真实的系统指标收集
         // 可以使用 procfs、sysfs 或其他系统 API
         
-        let mut metrics = IOMetrics::default();
-        metrics.timestamp = SystemTime::now();
+        let metrics = IOMetrics {
+            timestamp: SystemTime::now(),
+            ..Default::default()
+        };
 
         // 示例：读取 /proc/diskstats
         if let Ok(diskstats) = tokio::fs::read_to_string("/proc/diskstats").await {
@@ -295,7 +296,7 @@ impl AdvancedIOMonitor {
     /// 生成模拟指标（用于测试和开发）
     async fn generate_simulated_metrics(&self) -> IOMetrics {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // 获取业务指标影响
         let business_latency = self.business_metrics.request_latency.load(Ordering::Relaxed);
@@ -307,17 +308,17 @@ impl AdvancedIOMonitor {
         
         IOMetrics {
             timestamp: SystemTime::now(),
-            iops: base_iops + rng.gen_range(0..50),
-            read_iops: (base_iops * 6 / 10) + rng.gen_range(0..20),
-            write_iops: (base_iops * 4 / 10) + rng.gen_range(0..20),
-            queue_depth: rng.gen_range(1..20),
-            avg_latency: base_latency + rng.gen_range(0..10),
-            read_latency: base_latency + rng.gen_range(0..5),
-            write_latency: base_latency + rng.gen_range(0..15),
-            cpu_usage: rng.gen_range(10..70),
-            memory_usage: rng.gen_range(30..80),
-            disk_utilization: rng.gen_range(20..90),
-            network_io: rng.gen_range(10..1000),
+            iops: base_iops + rng.random_range(0..50),
+            read_iops: (base_iops * 6 / 10) + rng.random_range(0..20),
+            write_iops: (base_iops * 4 / 10) + rng.random_range(0..20),
+            queue_depth: rng.random_range(1..20),
+            avg_latency: base_latency + rng.random_range(0..10),
+            read_latency: base_latency + rng.random_range(0..5),
+            write_latency: base_latency + rng.random_range(0..15),
+            cpu_usage: rng.random_range(10..70),
+            memory_usage: rng.random_range(30..80),
+            disk_utilization: rng.random_range(20..90),
+            network_io: rng.random_range(10..1000),
         }
     }
 

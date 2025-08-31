@@ -20,14 +20,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use rustfs_common::{bucket_stats::BucketStats, data_usage::DataUsageInfo};
+use rustfs_common::data_usage::DataUsageInfo;
 
 use crate::{error::Result, Error};
 use super::{
     local_stats::StatsSummary,
-    node_scanner::{LoadLevel, ScanProgress},
+    node_scanner::{LoadLevel, ScanProgress, BucketStats},
 };
 
 /// 节点客户端配置

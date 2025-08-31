@@ -97,7 +97,8 @@ pub struct ResourceAllocation {
 pub struct AdvancedIOThrottler {
     /// 配置
     config: Arc<RwLock<IOThrottlerConfig>>,
-    /// 当前 IOPS 使用量
+    /// 当前 IOPS 使用量 (预留字段)
+    #[allow(dead_code)]
     current_iops: Arc<AtomicU64>,
     /// 业务优先级权重 (0-100)
     business_priority: Arc<AtomicU8>,
@@ -107,7 +108,8 @@ pub struct AdvancedIOThrottler {
     allocation_strategy: Arc<RwLock<ResourceAllocationStrategy>>,
     /// 限流历史记录
     throttle_history: Arc<RwLock<Vec<ThrottleRecord>>>,
-    /// 最后调节时间
+    /// 最后调节时间 (预留字段)
+    #[allow(dead_code)]
     last_adjustment: Arc<RwLock<SystemTime>>,
 }
 
@@ -194,12 +196,9 @@ impl AdvancedIOThrottler {
 
     /// 创建限流决策
     pub async fn make_throttle_decision(&self, load_level: LoadLevel, metrics: Option<MetricsSnapshot>) -> ThrottleDecision {
-        let config = self.config.read().await;
+        let _config = self.config.read().await;
         
-        let should_pause = match load_level {
-            LoadLevel::Critical => true,
-            _ => false,
-        };
+        let should_pause = matches!(load_level, LoadLevel::Critical);
 
         let suggested_delay = self.adjust_for_load_level(load_level).await;
         
@@ -366,7 +365,7 @@ impl AdvancedIOThrottler {
         let mut simulation_records = Vec::new();
         
         // 模拟不同负载级别的变化
-        let load_levels = vec![
+        let load_levels = [
             LoadLevel::Low,
             LoadLevel::Medium,
             LoadLevel::High,
@@ -379,7 +378,7 @@ impl AdvancedIOThrottler {
         let step_duration = duration / load_levels.len() as u32;
         
         for (i, &load_level) in load_levels.iter().enumerate() {
-            let step_start = SystemTime::now();
+            let _step_start = SystemTime::now();
             
             // 模拟该负载级别下的指标
             let metrics = MetricsSnapshot {

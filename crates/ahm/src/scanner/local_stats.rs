@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     sync::Arc,
@@ -24,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use rustfs_common::{bucket_stats::BucketStats, data_usage::DataUsageInfo};
+use rustfs_common::data_usage::DataUsageInfo;
 
 use crate::{error::Result, Error};
-use super::node_scanner::{DiskStats, LocalScanStats};
+use super::node_scanner::{DiskStats, LocalScanStats, BucketStats};
 
 /// 统计数据持久化管理器
 /// 
@@ -256,8 +255,8 @@ impl LocalStatsManager {
 
         // 按存储桶更新统计
         for entry in &result.entries {
-            let bucket_stat = stats.buckets_stats.entry(entry.bucket_name.clone())
-                .or_insert_with(|| BucketStats::default());
+            let _bucket_stat = stats.buckets_stats.entry(entry.bucket_name.clone())
+                .or_insert_with(BucketStats::default);
 
             // TODO: 更新 BucketStats 的具体字段
             // 这里需要根据 BucketStats 的实际结构来更新
