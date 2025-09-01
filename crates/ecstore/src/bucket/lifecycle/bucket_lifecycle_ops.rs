@@ -686,7 +686,14 @@ pub async fn expire_transitioned_object(
         //transitionLogIf(ctx, err);
     }
 
-    let dobj = api.delete_object(&oi.bucket, &oi.name, opts).await?;
+    let dobj = match api.delete_object(&oi.bucket, &oi.name, opts).await {
+        Ok(obj) => obj,
+        Err(e) => {
+            error!("Failed to delete transitioned object {}/{}: {:?}", oi.bucket, oi.name, e);
+            // Return the original object info if deletion fails
+            oi.clone()
+        }
+    };
 
     //defer auditLogLifecycle(ctx, *oi, ILMExpiry, tags, traceFn)
 
@@ -945,10 +952,15 @@ pub async fn apply_expiry_on_non_transitioned_objects(
 
     // let time_ilm = ScannerMetrics::time_ilm(lc_event.action.clone());
 
-    let mut dobj = api
-        .delete_object(&oi.bucket, &encode_dir_object(&oi.name), opts)
-        .await
-        .unwrap();
+    let mut dobj = match api.delete_object(&oi.bucket, &encode_dir_object(&oi.name), opts).await {
+        Ok(obj) => obj,
+        Err(e) => {
+            error!("Failed to delete object {}/{}: {:?}", oi.bucket, oi.name, e);
+            // Return the original object info if deletion fails
+            oi.clone()
+        }
+    };
+    
     if dobj.name.is_empty() {
         dobj = oi.clone();
     }

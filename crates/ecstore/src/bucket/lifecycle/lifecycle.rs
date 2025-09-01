@@ -440,6 +440,7 @@ impl Lifecycle for BucketLifecycleConfiguration {
                             if date0.unix_timestamp() != 0
                                 && (now.unix_timestamp() == 0 || now.unix_timestamp() > date0.unix_timestamp())
                             {
+                                info!("eval_inner: expiration by date - date0={:?}", date0);
                                 events.push(Event {
                                     action: IlmAction::DeleteAction,
                                     rule_id: rule.id.clone().expect("err!"),
@@ -474,7 +475,11 @@ impl Lifecycle for BucketLifecycleConfiguration {
                                 }*/
                                 events.push(event);
                             }
+                        } else {
+                            info!("eval_inner: expiration.days is None");
                         }
+                    } else {
+                        info!("eval_inner: rule.expiration is None");
                     }
 
                     if obj.transition_status != TRANSITION_COMPLETE {
@@ -620,6 +625,7 @@ impl LifecycleCalculate for Transition {
 
 pub fn expected_expiry_time(mod_time: OffsetDateTime, days: i32) -> OffsetDateTime {
     if days == 0 {
+        info!("expected_expiry_time: days=0, returning UNIX_EPOCH for immediate expiry");
         return OffsetDateTime::UNIX_EPOCH; // Return epoch time to ensure immediate expiry
     }
     let t = mod_time
@@ -632,6 +638,7 @@ pub fn expected_expiry_time(mod_time: OffsetDateTime, days: i32) -> OffsetDateTi
         }
     }
     //t.Truncate(24 * hour)
+    info!("expected_expiry_time: mod_time={:?}, days={}, result={:?}", mod_time, days, t);
     t
 }
 

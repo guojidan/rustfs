@@ -36,6 +36,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

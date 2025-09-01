@@ -275,10 +275,36 @@ impl Scanner {
                             continue;
                         }
                         
+                        // Get bucket lifecycle configuration
+                        let lifecycle_config = rustfs_ecstore::bucket::metadata_sys::get_lifecycle_config(bucket_name)
+                            .await
+                            .ok()
+                            .map(|(c, _)| Arc::new(c));
+                        
+                        // Get bucket versioning configuration
+                        let versioning_config = Arc::new(VersioningConfig { enabled: bucket_info.versioning });
+                        
                         // Count objects in this bucket
                         let actual_objects = self.count_objects_in_bucket(&ecstore, bucket_name).await;
                         total_objects_scanned += actual_objects;
                         debug!("Counted {} objects in bucket {} (actual count)", actual_objects, bucket_name);
+                        
+                        // Process objects for lifecycle actions
+                        if let Some(lifecycle_config) = &lifecycle_config {
+                            debug!("Processing lifecycle actions for bucket: {}", bucket_name);
+                            let mut scanner_item = 
+                                ScannerItem::new(bucket_name.to_string(), Some(lifecycle_config.clone()), Some(versioning_config.clone()));
+                            
+                            // List objects in bucket and apply lifecycle actions
+                            match self.process_bucket_objects_for_lifecycle(&ecstore, bucket_name, &mut scanner_item).await {
+                                Ok(processed_count) => {
+                                    debug!("Processed {} objects for lifecycle in bucket {}", processed_count, bucket_name);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to process lifecycle actions for bucket {}: {}", bucket_name, e);
+                                }
+                            }
+                        }
                         
                         // If deep scan is enabled, verify each object's integrity
                         if enable_deep_scan && enable_healing {
@@ -488,6 +514,67 @@ impl Scanner {
         } else {
             total_objects
         }
+    }
+
+    /// Process bucket objects for lifecycle actions
+    async fn process_bucket_objects_for_lifecycle(
+        &self,
+        ecstore: &std::sync::Arc<rustfs_ecstore::store::ECStore>,
+        bucket_name: &str,
+        scanner_item: &mut ScannerItem,
+    ) -> Result<u64> {
+        info!("Processing objects for lifecycle in bucket: {}", bucket_name);
+        let mut processed_count = 0u64;
+        
+        // Instead of filesystem scanning, use ECStore's list_objects_v2 method to get correct object names
+        let mut continuation_token = None;
+        loop {
+            let list_result = match ecstore.clone()
+                .list_objects_v2(
+                    bucket_name,
+                    "", // prefix
+                    continuation_token.clone(),
+                    None, // delimiter
+                    1000, // max_keys
+                    false, // fetch_owner
+                    None, // start_after
+                )
+                .await 
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!("Failed to list objects in bucket {}: {}", bucket_name, e);
+                    break;
+                }
+            };
+            
+            info!("Found {} objects in bucket {}", list_result.objects.len(), bucket_name);
+            
+            for obj in list_result.objects {
+                info!("Processing lifecycle for object: {}/{}", bucket_name, obj.name);
+                
+                // Create a minimal MetaCacheEntry for the object
+                let mut meta_entry = rustfs_filemeta::metacache::MetaCacheEntry::default();
+                meta_entry.name = obj.name.clone();
+                
+                // Apply lifecycle actions
+                if let Err(e) = scanner_item.apply_actions(&obj.name, meta_entry).await {
+                    warn!("Failed to apply lifecycle actions for {}/{}: {}", bucket_name, obj.name, e);
+                } else {
+                    processed_count += 1;
+                }
+            }
+            
+            // Check if there are more objects to list
+            if list_result.is_truncated {
+                continuation_token = list_result.next_continuation_token.clone();
+            } else {
+                break;
+            }
+        }
+        
+        info!("Processed {} objects for lifecycle in bucket {}", processed_count, bucket_name);
+        Ok(processed_count)
     }
 
     /// Start the optimized scanner
@@ -712,17 +799,22 @@ impl Scanner {
         match self.stats_aggregator.get_aggregated_stats().await {
             Ok(aggregated_stats) => {
                 debug!("Successfully got aggregated stats: {} objects scanned", aggregated_stats.total_objects_scanned);
+                info!("Aggregated stats: total_objects_scanned={}, online_node_count={}", 
+                      aggregated_stats.total_objects_scanned, aggregated_stats.online_node_count);
                 // Update legacy metrics with aggregated data
                 self.update_legacy_metrics_from_aggregated(&aggregated_stats).await;
                 
                 // If aggregated stats show no objects scanned, also try basic test scan
                 if aggregated_stats.total_objects_scanned == 0 {
                     debug!("Aggregated stats show 0 objects, falling back to direct ECStore scan for testing");
+                    info!("Calling perform_basic_test_scan due to 0 aggregated objects");
                     if let Err(scan_error) = self.perform_basic_test_scan().await {
                         warn!("Basic test scan failed: {}", scan_error);
                     } else {
                         debug!("Basic test scan completed successfully after aggregated stats");
                     }
+                } else {
+                    info!("Not calling perform_basic_test_scan because aggregated_stats.total_objects_scanned > 0");
                 }
                 
                 info!("Scan cycle completed with {} online nodes, {} total objects scanned", 
@@ -733,16 +825,20 @@ impl Scanner {
                 // Fallback: use local node stats only
                 let local_stats = self.node_scanner.get_stats_summary().await;
                 debug!("Local stats: {} objects scanned", local_stats.total_objects_scanned);
+                info!("Local stats: total_objects_scanned={}", local_stats.total_objects_scanned);
                 self.update_legacy_metrics_from_local(&local_stats).await;
                 
                 // In test environments, if no real scanning happened, perform basic scan
                 if local_stats.total_objects_scanned == 0 {
                     debug!("No objects scanned by NodeScanner, falling back to direct ECStore scan for testing");
+                    info!("Calling perform_basic_test_scan due to 0 local objects");
                     if let Err(scan_error) = self.perform_basic_test_scan().await {
                         warn!("Basic test scan failed: {}", scan_error);
                     } else {
                         debug!("Basic test scan completed successfully");
                     }
+                } else {
+                    info!("Not calling perform_basic_test_scan because local_stats.total_objects_scanned > 0");
                 }
             }
         }
