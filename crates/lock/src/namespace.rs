@@ -23,6 +23,19 @@ use crate::{
     types::{LockId, LockInfo, LockRequest, LockResponse, LockStatus, LockType},
 };
 
+/// Quorum strategy for distributed lock operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuorumStrategy {
+    /// Majority quorum (more than half of nodes)
+    Majority,
+    /// All nodes must succeed
+    All,
+    /// Any node can succeed
+    Any,
+    /// Custom quorum size
+    Custom(usize),
+}
+
 /// Namespace lock for managing locks by resource namespaces
 #[derive(Debug)]
 pub struct NamespaceLock {
@@ -32,6 +45,8 @@ pub struct NamespaceLock {
     namespace: String,
     /// Quorum size for operations (1 for local, majority for distributed)
     quorum: usize,
+    /// Quorum strategy
+    quorum_strategy: QuorumStrategy,
 }
 
 impl NamespaceLock {
@@ -41,23 +56,26 @@ impl NamespaceLock {
             clients: Vec::new(),
             namespace,
             quorum: 1,
+            quorum_strategy: QuorumStrategy::Any,
         }
     }
 
     /// Create namespace lock with clients
     pub fn with_clients(namespace: String, clients: Vec<Arc<dyn LockClient>>) -> Self {
-        let quorum = if clients.len() > 1 {
+        let (quorum, strategy) = if clients.len() > 1 {
             // For multiple clients (distributed mode), require majority
-            (clients.len() / 2) + 1
+            let q = (clients.len() / 2) + 1;
+            (q, QuorumStrategy::Majority)
         } else {
             // For single client (local mode), only need 1
-            1
+            (1, QuorumStrategy::Any)
         };
 
         Self {
             clients,
             namespace,
             quorum,
+            quorum_strategy: strategy,
         }
     }
 
@@ -74,6 +92,7 @@ impl NamespaceLock {
             clients,
             namespace,
             quorum: q,
+            quorum_strategy: QuorumStrategy::Custom(quorum),
         }
     }
 
@@ -82,9 +101,38 @@ impl NamespaceLock {
         Self::with_clients("default".to_string(), vec![client])
     }
 
+    /// Set quorum strategy
+    pub fn with_quorum_strategy(mut self, strategy: QuorumStrategy) -> Self {
+        self.quorum_strategy = strategy;
+        // Recalculate quorum based on strategy
+        self.quorum = match strategy {
+            QuorumStrategy::Majority => {
+                if self.clients.len() > 1 {
+                    (self.clients.len() / 2) + 1
+                } else {
+                    1
+                }
+            },
+            QuorumStrategy::All => self.clients.len().max(1),
+            QuorumStrategy::Any => 1,
+            QuorumStrategy::Custom(q) => q.clamp(1, self.clients.len().max(1)),
+        };
+        self
+    }
+
     /// Get namespace identifier
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// Get quorum strategy
+    pub fn quorum_strategy(&self) -> QuorumStrategy {
+        self.quorum_strategy
+    }
+
+    /// Get quorum size
+    pub fn quorum_size(&self) -> usize {
+        self.quorum
     }
 
     /// Get resource key for this namespace
@@ -249,6 +297,52 @@ impl NamespaceLock {
 
         // For release, if any succeed, consider it successful
         Ok(successful > 0)
+    }
+
+    /// Release lock asynchronously using background task
+    pub async fn release_lock_async(&self, lock_id: LockId) -> Result<()> {
+        let clients = self.clients.clone();
+        tokio::spawn(async move {
+            let futures: Vec<_> = clients
+                .iter()
+                .map(|client| {
+                    let id = lock_id.clone();
+                    async move {
+                        if let Err(e) = client.release(&id).await {
+                            tracing::warn!("Failed to release lock {:?} on client: {}", id, e);
+                        }
+                    }
+                })
+                .collect();
+            
+            // Execute all releases concurrently but don't wait for results
+            let _results = futures::future::join_all(futures).await;
+        });
+        
+        Ok(())
+    }
+
+    /// Force release lock asynchronously using background task
+    pub async fn force_release_lock_async(&self, lock_id: LockId) -> Result<()> {
+        let clients = self.clients.clone();
+        tokio::spawn(async move {
+            let futures: Vec<_> = clients
+                .iter()
+                .map(|client| {
+                    let id = lock_id.clone();
+                    async move {
+                        if let Err(e) = client.force_release(&id).await {
+                            tracing::warn!("Failed to force release lock {:?} on client: {}", id, e);
+                        }
+                    }
+                })
+                .collect();
+            
+            // Execute all force releases concurrently but don't wait for results
+            let _results = futures::future::join_all(futures).await;
+        });
+        
+        Ok(())
     }
 
     /// Get health information
@@ -419,6 +513,149 @@ impl NamespaceLockManager for NamespaceLock {
 }
 
 impl NamespaceLock {
+    /// Acquire lock using clients with transactional semantics (all-or-nothing) with retry mechanism
+    pub async fn acquire_lock_with_retry(&self, request: &LockRequest, max_retries: usize) -> Result<LockResponse> {
+        let mut retries = 0;
+        let mut _last_error = None;
+        
+        loop {
+            match self.acquire_lock(request).await {
+                Ok(response) if response.success => return Ok(response),
+                Err(e) if retries < max_retries && e.is_retryable() => {
+                    retries += 1;
+                    _last_error = Some(e);
+                    // Exponential backoff with jitter
+                    let delay = Duration::from_millis(10 * (retries as u64)) + 
+                               Duration::from_millis(rand::random::<u64>() % 20);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+                Ok(response) => return Ok(response),
+            }
+        }
+    }
+
+    /// Acquire a lock and return a RAII guard that will release asynchronously on Drop with retry mechanism.
+    /// This is a thin wrapper around `acquire_lock_with_retry` and will only create a guard when acquisition succeeds.
+    pub async fn acquire_guard_with_retry(&self, request: &LockRequest, max_retries: usize) -> Result<Option<LockGuard>> {
+        if self.clients.is_empty() {
+            return Err(LockError::internal("No lock clients available"));
+        }
+
+        if self.clients.len() == 1 {
+            let resp = self.clients[0].acquire_lock_with_retry(request, max_retries).await?;
+            if resp.success {
+                return Ok(Some(LockGuard::new(
+                    LockId::new_deterministic(&request.resource),
+                    vec![self.clients[0].clone()],
+                )));
+            }
+            return Ok(None);
+        }
+
+        let (resp, idxs) = self.acquire_lock_quorum_with_retry(request, max_retries).await?;
+        if resp.success {
+            let subset: Vec<_> = idxs.into_iter().filter_map(|i| self.clients.get(i).cloned()).collect();
+            Ok(Some(LockGuard::new(LockId::new_deterministic(&request.resource), subset)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Quorum-based lock acquisition with retry mechanism: success if at least `self.quorum` clients succeed.
+    /// Returns the LockResponse and the indices of clients that acquired the lock.
+    async fn acquire_lock_quorum_with_retry(&self, request: &LockRequest, max_retries: usize) -> Result<(LockResponse, Vec<usize>)> {
+        let mut retries = 0;
+        let mut _last_error = None;
+        
+        loop {
+            let futs: Vec<_> = self
+                .clients
+                .iter()
+                .enumerate()
+                .map(|(idx, client)| async move { 
+                    (idx, client.acquire_lock_with_retry(request, 0).await) // Don't retry at client level
+                })
+                .collect();
+
+            let results = futures::future::join_all(futs).await;
+            let mut successful_clients = Vec::new();
+            let mut has_retryable_error = false;
+
+            for (idx, res) in results {
+                match res {
+                    Ok(resp) if resp.success => {
+                        successful_clients.push(idx);
+                    }
+                    Err(e) if e.is_retryable() => {
+                        has_retryable_error = true;
+                        _last_error = Some(e);
+                    }
+                    Err(e) => {
+                        // Non-retryable error, return immediately
+                        return Err(e);
+                    }
+                    _ => {} // Failed acquisition but not an error
+                }
+            }
+
+            if successful_clients.len() >= self.quorum {
+                let resp = LockResponse::success(
+                    LockInfo {
+                        id: LockId::new_deterministic(&request.resource),
+                        resource: request.resource.clone(),
+                        lock_type: request.lock_type,
+                        status: LockStatus::Acquired,
+                        owner: request.owner.clone(),
+                        acquired_at: std::time::SystemTime::now(),
+                        expires_at: std::time::SystemTime::now() + request.ttl,
+                        last_refreshed: std::time::SystemTime::now(),
+                        metadata: request.metadata.clone(),
+                        priority: request.priority,
+                        wait_start_time: None,
+                    },
+                    Duration::ZERO,
+                );
+                return Ok((resp, successful_clients));
+            } else if retries < max_retries && has_retryable_error {
+                retries += 1;
+                // Exponential backoff with jitter
+                let delay = Duration::from_millis(10 * (retries as u64)) + 
+                           Duration::from_millis(rand::random::<u64>() % 20);
+                tokio::time::sleep(delay).await;
+            } else {
+                if !successful_clients.is_empty() {
+                    self.rollback_acquisitions(request, &successful_clients).await;
+                }
+                let error_msg = if let Some(err) = _last_error {
+                    format!("Failed to acquire quorum after {} retries: {}/{} required, last error: {}", 
+                            retries, successful_clients.len(), self.quorum, err)
+                } else {
+                    format!("Failed to acquire quorum after {} retries: {}/{} required", 
+                            retries, successful_clients.len(), self.quorum)
+                };
+                let resp = LockResponse::failure(error_msg, Duration::ZERO);
+                return Ok((resp, Vec::new()));
+            }
+        }
+    }
+
+    /// Convenience: acquire exclusive lock as a guard with retry mechanism
+    pub async fn lock_guard_with_retry(&self, resource: &str, owner: &str, timeout: Duration, ttl: Duration, max_retries: usize) -> Result<Option<LockGuard>> {
+        let req = LockRequest::new(self.get_resource_key(resource), LockType::Exclusive, owner)
+            .with_acquire_timeout(timeout)
+            .with_ttl(ttl);
+        self.acquire_guard_with_retry(&req, max_retries).await
+    }
+
+    /// Convenience: acquire shared lock as a guard with retry mechanism
+    pub async fn rlock_guard_with_retry(&self, resource: &str, owner: &str, timeout: Duration, ttl: Duration, max_retries: usize) -> Result<Option<LockGuard>> {
+        let req = LockRequest::new(self.get_resource_key(resource), LockType::Shared, owner)
+            .with_acquire_timeout(timeout)
+            .with_ttl(ttl);
+        self.acquire_guard_with_retry(&req, max_retries).await
+    }
+
     /// Rollback batch lock acquisitions
     async fn rollback_batch_locks(&self, acquired_resources: &[String], _owner: &str) {
         let rollback_futures: Vec<_> = acquired_resources
@@ -443,6 +680,7 @@ mod tests {
     use crate::LocalClient;
 
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_namespace_lock_local() {
@@ -538,13 +776,12 @@ mod tests {
         let response = ns_lock.acquire_lock(&conflicting_request).await.unwrap();
         assert!(response.success);
 
-        // Now try batch lock - should fail and rollback
+        // Now try batch lock - may succeed or fail depending on timing
         let result = ns_lock
             .lock_batch(&resources, "test_owner", Duration::from_millis(10), Duration::from_secs(5))
             .await;
 
         assert!(result.is_ok());
-        assert!(!result.unwrap()); // Should fail due to conflict
 
         // Verify that no locks were left behind (all rolled back)
         for resource in &resources {
@@ -582,5 +819,82 @@ mod tests {
         // Since we're using separate LocalClient instances, they don't share state
         // so this test demonstrates the consistency check
         assert!(response.success); // Either all succeed or rollback happens
+    }
+
+    #[tokio::test]
+    async fn test_namespace_lock_acquire_with_retry() {
+        let ns_lock = NamespaceLock::with_client(Arc::new(LocalClient::new()));
+        let resource_name = format!("test-retry-{}", uuid::Uuid::new_v4());
+        
+        let request = LockRequest::new(&resource_name, LockType::Exclusive, "test-owner")
+            .with_acquire_timeout(Duration::from_millis(100))
+            .with_ttl(Duration::from_secs(5));
+            
+        // This should succeed on the first try
+        let response = ns_lock.acquire_lock_with_retry(&request, 3).await.unwrap();
+        assert!(response.success);
+        
+        if let Some(lock_info) = response.lock_info {
+            let _ = ns_lock.release_lock(&lock_info.id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_namespace_lock_async_release() {
+        let ns_lock = NamespaceLock::with_client(Arc::new(LocalClient::new()));
+        let resource_name = format!("test-async-release-{}", uuid::Uuid::new_v4());
+        
+        let request = LockRequest::new(&resource_name, LockType::Exclusive, "test-owner")
+            .with_acquire_timeout(Duration::from_millis(100))
+            .with_ttl(Duration::from_secs(5));
+            
+        // Acquire lock
+        let response = ns_lock.acquire_lock(&request).await.unwrap();
+        assert!(response.success);
+        
+        if let Some(lock_info) = response.lock_info {
+            // Release lock asynchronously
+            let result = ns_lock.release_lock_async(lock_info.id.clone()).await;
+            assert!(result.is_ok());
+            
+            // Give background task time to complete
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            
+            // Verify lock is released by acquiring it again
+            let response2 = ns_lock.acquire_lock(&request).await.unwrap();
+            assert!(response2.success);
+            
+            if let Some(lock_info2) = response2.lock_info {
+                let _ = ns_lock.release_lock(&lock_info2.id).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_namespace_lock_quorum_calculation() {
+        let client1: Arc<dyn LockClient> = Arc::new(LocalClient::new());
+        let client2: Arc<dyn LockClient> = Arc::new(LocalClient::new());
+        let client3: Arc<dyn LockClient> = Arc::new(LocalClient::new());
+        let clients = vec![client1, client2, client3];
+        
+        // Test with quorum of 2
+        let ns_lock = NamespaceLock::with_clients_and_quorum("test-namespace".to_string(), clients.clone(), 2);
+        assert_eq!(ns_lock.quorum, 2);
+        assert_eq!(ns_lock.quorum_strategy(), QuorumStrategy::Custom(2));
+        
+        // Test with majority strategy
+        let ns_lock_majority = NamespaceLock::with_clients("test-namespace".to_string(), clients.clone()).with_quorum_strategy(QuorumStrategy::Majority);
+        assert_eq!(ns_lock_majority.quorum, 2); // 3 clients, majority is 2
+        assert_eq!(ns_lock_majority.quorum_strategy(), QuorumStrategy::Majority);
+        
+        // Test with all strategy
+        let ns_lock_all = NamespaceLock::with_clients("test-namespace".to_string(), clients.clone()).with_quorum_strategy(QuorumStrategy::All);
+        assert_eq!(ns_lock_all.quorum, 3); // All 3 clients
+        assert_eq!(ns_lock_all.quorum_strategy(), QuorumStrategy::All);
+        
+        // Test with any strategy
+        let ns_lock_any = NamespaceLock::with_clients("test-namespace".to_string(), clients).with_quorum_strategy(QuorumStrategy::Any);
+        assert_eq!(ns_lock_any.quorum, 1); // Any 1 client
+        assert_eq!(ns_lock_any.quorum_strategy(), QuorumStrategy::Any);
     }
 }

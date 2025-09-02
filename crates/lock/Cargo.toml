@@ -31,7 +31,9 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+dashmap.workspace = true
 futures.workspace = true
+rand.workspace = true
 rustfs-protos.workspace = true
 serde.workspace = true
 serde_json.workspace = true

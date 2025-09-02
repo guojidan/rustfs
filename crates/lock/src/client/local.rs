@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use crate::{
+    cache::LockCache,
     client::LockClient,
     error::Result,
     local::LocalLockMap,
@@ -25,17 +26,26 @@ use crate::{
 ///
 /// Uses global singleton LocalLockMap to ensure all clients access the same lock instance
 #[derive(Debug, Clone)]
-pub struct LocalClient;
+pub struct LocalClient {
+    cache: Arc<LockCache>,
+}
 
 impl LocalClient {
     /// Create new local client
     pub fn new() -> Self {
-        Self
+        Self {
+            cache: Arc::new(LockCache::default()),
+        }
     }
 
     /// Get global lock map instance
     pub fn get_lock_map(&self) -> Arc<LocalLockMap> {
         crate::get_global_lock_map()
+    }
+    
+    /// Get cache instance
+    pub fn get_cache(&self) -> Arc<LockCache> {
+        self.cache.clone()
     }
 }
 
@@ -48,6 +58,12 @@ impl Default for LocalClient {
 #[async_trait::async_trait]
 impl LockClient for LocalClient {
     async fn acquire_exclusive(&self, request: &LockRequest) -> Result<LockResponse> {
+        // Check cache first
+        let cache_key = format!("exclusive:{}", request.resource);
+        if let Some(cached_info) = self.cache.get(&cache_key) {
+            return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
+        }
+        
         let lock_map = self.get_lock_map();
         let success = lock_map
             .lock_with_ttl_id(request)
@@ -67,6 +83,10 @@ impl LockClient for LocalClient {
                 priority: request.priority,
                 wait_start_time: None,
             };
+            
+            // Cache the lock info
+            self.cache.put(cache_key, lock_info.clone());
+            
             Ok(LockResponse::success(lock_info, std::time::Duration::ZERO))
         } else {
             Ok(LockResponse::failure("Lock acquisition failed".to_string(), std::time::Duration::ZERO))
@@ -74,6 +94,12 @@ impl LockClient for LocalClient {
     }
 
     async fn acquire_shared(&self, request: &LockRequest) -> Result<LockResponse> {
+        // Check cache first
+        let cache_key = format!("shared:{}", request.resource);
+        if let Some(cached_info) = self.cache.get(&cache_key) {
+            return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
+        }
+        
         let lock_map = self.get_lock_map();
         let success = lock_map
             .rlock_with_ttl_id(request)
@@ -93,6 +119,10 @@ impl LockClient for LocalClient {
                 priority: request.priority,
                 wait_start_time: None,
             };
+            
+            // Cache the lock info
+            self.cache.put(cache_key, lock_info.clone());
+            
             Ok(LockResponse::success(lock_info, std::time::Duration::ZERO))
         } else {
             Ok(LockResponse::failure("Lock acquisition failed".to_string(), std::time::Duration::ZERO))
@@ -100,6 +130,11 @@ impl LockClient for LocalClient {
     }
 
     async fn release(&self, lock_id: &LockId) -> Result<bool> {
+        // Remove from cache
+        let cache = self.get_cache();
+        cache.remove(&format!("exclusive:{}", lock_id.resource));
+        cache.remove(&format!("shared:{}", lock_id.resource));
+        
         let lock_map = self.get_lock_map();
 
         // Try to release the lock directly by ID
@@ -116,9 +151,21 @@ impl LockClient for LocalClient {
         }
     }
 
-    async fn refresh(&self, _lock_id: &LockId) -> Result<bool> {
+    async fn refresh(&self, lock_id: &LockId) -> Result<bool> {
         // For local locks, refresh is not needed as they don't expire automatically
-        Ok(true)
+        // But we should update the cache entry if it exists
+        let cache = self.get_cache();
+        if let Some(mut lock_info) = cache.get(&format!("exclusive:{}", lock_id.resource)) {
+            lock_info.last_refreshed = std::time::SystemTime::now();
+            cache.put(format!("exclusive:{}", lock_id.resource), lock_info);
+            Ok(true)
+        } else if let Some(mut lock_info) = cache.get(&format!("shared:{}", lock_id.resource)) {
+            lock_info.last_refreshed = std::time::SystemTime::now();
+            cache.put(format!("shared:{}", lock_id.resource), lock_info);
+            Ok(true)
+        } else {
+            Ok(true)
+        }
     }
 
     async fn force_release(&self, lock_id: &LockId) -> Result<bool> {
@@ -175,6 +222,7 @@ impl LockClient for LocalClient {
     }
 
     async fn close(&self) -> Result<()> {
+        self.cache.clear();
         Ok(())
     }
 
@@ -192,6 +240,7 @@ mod tests {
     use super::*;
     use crate::types::LockType;
 
+
     #[tokio::test]
     async fn test_local_client_acquire_exclusive() {
         let client = LocalClient::new();
@@ -202,8 +251,13 @@ mod tests {
         let response = client.acquire_exclusive(&request).await.unwrap();
         assert!(response.is_success());
 
+        // Test cache
+        let cached_response = client.acquire_exclusive(&request).await.unwrap();
+        assert!(cached_response.is_success());
+        assert_eq!(response.lock_info.clone().unwrap().id, cached_response.lock_info.unwrap().id);
+
         // Clean up
-        if let Some(lock_info) = response.lock_info() {
+        if let Some(lock_info) = &response.lock_info {
             let _ = client.release(&lock_info.id).await;
         }
     }
@@ -218,8 +272,13 @@ mod tests {
         let response = client.acquire_shared(&request).await.unwrap();
         assert!(response.is_success());
 
+        // Test cache
+        let cached_response = client.acquire_shared(&request).await.unwrap();
+        assert!(cached_response.is_success());
+        assert_eq!(response.lock_info.clone().unwrap().id, cached_response.lock_info.unwrap().id);
+
         // Clean up
-        if let Some(lock_info) = response.lock_info() {
+        if let Some(lock_info) = &response.lock_info {
             let _ = client.release(&lock_info.id).await;
         }
     }
@@ -236,9 +295,14 @@ mod tests {
         assert!(response.is_success());
 
         // Get the lock ID from the response
-        if let Some(lock_info) = response.lock_info() {
+        if let Some(lock_info) = &response.lock_info {
             let result = client.release(&lock_info.id).await.unwrap();
             assert!(result);
+            
+            // Verify we can acquire the lock again (same ID since it's deterministic)
+            let cached_response = client.acquire_exclusive(&request).await.unwrap();
+            assert!(cached_response.is_success());
+            assert_eq!(lock_info.id, cached_response.lock_info.unwrap().id);
         } else {
             panic!("No lock info in response");
         }
@@ -268,7 +332,7 @@ mod tests {
         assert!(!shared_response.is_success(), "Shared lock should fail when exclusive lock exists");
 
         // Clean up exclusive lock
-        if let Some(exclusive_info) = exclusive_response.lock_info() {
+        if let Some(exclusive_info) = &exclusive_response.lock_info {
             let _ = client.release(&exclusive_info.id).await;
         }
 
@@ -282,7 +346,7 @@ mod tests {
         );
 
         // Clean up
-        if let Some(shared_info) = shared_response2.lock_info() {
+        if let Some(shared_info) = &shared_response2.lock_info {
             let _ = client.release(&shared_info.id).await;
         }
     }
@@ -298,7 +362,7 @@ mod tests {
         let exclusive_response = client.acquire_exclusive(&exclusive_request).await.unwrap();
         assert!(exclusive_response.is_success());
 
-        if let Some(exclusive_info) = exclusive_response.lock_info() {
+        if let Some(exclusive_info) = &exclusive_response.lock_info {
             assert_eq!(exclusive_info.lock_type, LockType::Exclusive);
 
             // Check status should return correct lock type
@@ -317,7 +381,7 @@ mod tests {
         let shared_response = client.acquire_shared(&shared_request).await.unwrap();
         assert!(shared_response.is_success());
 
-        if let Some(shared_info) = shared_response.lock_info() {
+        if let Some(shared_info) = &shared_response.lock_info {
             assert_eq!(shared_info.lock_type, LockType::Shared);
 
             // Check status should return correct lock type
@@ -350,7 +414,7 @@ mod tests {
         assert!(!resp2.is_success(), "client2 should not acquire exclusive lock while client1 holds it");
 
         // client1 release lock
-        if let Some(lock_info) = resp1.lock_info() {
+        if let Some(lock_info) = &resp1.lock_info {
             let _ = client1.release(&lock_info.id).await;
         }
 
@@ -359,8 +423,45 @@ mod tests {
         assert!(resp3.is_success(), "client2 should acquire exclusive lock after client1 releases it");
 
         // clean up
-        if let Some(lock_info) = resp3.lock_info() {
+        if let Some(lock_info) = &resp3.lock_info {
             let _ = client2.release(&lock_info.id).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_local_client_cache_functionality() {
+        let client = LocalClient::new();
+        let resource_name = format!("test-cache-{}", uuid::Uuid::new_v4());
+        
+        // Acquire lock
+        let request = LockRequest::new(&resource_name, LockType::Exclusive, "test-owner")
+            .with_acquire_timeout(std::time::Duration::from_secs(30));
+        let response1 = client.acquire_exclusive(&request).await.unwrap();
+        assert!(response1.is_success());
+        
+        // Second acquisition should come from cache
+        let response2 = client.acquire_exclusive(&request).await.unwrap();
+        assert!(response2.is_success());
+        
+        // Both responses should have the same lock ID
+        assert_eq!(
+            response1.lock_info.as_ref().unwrap().id,
+            response2.lock_info.unwrap().id
+        );
+        
+        // Release lock should clear cache
+        if let Some(lock_info) = &response1.lock_info {
+            let _ = client.release(&lock_info.id).await;
+        }
+        
+        // Third acquisition should create a new lock (but with same ID since it's deterministic)
+        let response3 = client.acquire_exclusive(&request).await.unwrap();
+        assert!(response3.is_success());
+        
+        // This should be the same lock ID (deterministic based on resource)
+        assert_eq!(
+            response1.lock_info.as_ref().unwrap().id,
+            response3.lock_info.unwrap().id
+        );
     }
 }

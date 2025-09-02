@@ -145,7 +145,7 @@ impl Default for NodeScannerConfig {
         let data_dir = std::env::temp_dir().join("rustfs_scanner");
         
         Self {
-            scan_interval: Duration::from_secs(60),        // 1分钟基础间隔
+            scan_interval: Duration::from_secs(300),       // 5分钟基础间隔
             disk_scan_delay: Duration::from_secs(10),      // 磁盘间10秒延迟
             enable_smart_scheduling: true,
             enable_checkpoint: true,
@@ -454,7 +454,7 @@ impl NodeScanner {
         let throttler_config = IOThrottlerConfig {
             max_iops: 1000,
             base_business_priority: 95,
-            min_scan_delay: 100,
+            min_scan_delay: 5000,
             max_scan_delay: 60000,
             enable_dynamic_adjustment: true,
             adjustment_response_time: 5,

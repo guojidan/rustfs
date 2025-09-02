@@ -199,8 +199,8 @@ async fn test_lifecycle_expiry_basic() {
 
     // Create scanner with very short intervals for testing
     let scanner_config = ScannerConfig {
-        scan_interval: Duration::from_millis(100),
-        deep_scan_interval: Duration::from_millis(500),
+        scan_interval: Duration::from_secs(5),
+        deep_scan_interval: Duration::from_secs(10),
         max_concurrent_scans: 1,
         ..Default::default()
     };

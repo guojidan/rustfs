@@ -275,7 +275,7 @@ async fn test_scanner_performance_impact() {
     let node_id = "performance-test-node".to_string();
     
     let config = NodeScannerConfig {
-        scan_interval: Duration::from_millis(100), // 快速扫描用于测试
+        scan_interval: Duration::from_secs(5), // 5s扫描用于测试
         disk_scan_delay: Duration::from_millis(10),
         data_dir: temp_dir.path().to_path_buf(),
         ..Default::default()

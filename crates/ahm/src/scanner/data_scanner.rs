@@ -80,7 +80,7 @@ pub struct ScannerConfig {
 impl Default for ScannerConfig {
     fn default() -> Self {
         Self {
-            scan_interval: Duration::from_secs(60),        // 1 minute
+            scan_interval: Duration::from_secs(300),       // 5 minutes
             deep_scan_interval: Duration::from_secs(3600), // 1 hour
             max_concurrent_scans: 20,
             enable_healing: true,

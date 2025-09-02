@@ -372,7 +372,7 @@ async fn test_optimized_load_balancing_and_throttling() {
     let config = NodeScannerConfig {
         data_dir: temp_dir.path().to_path_buf(),
         enable_smart_scheduling: true,
-        scan_interval: Duration::from_millis(100), // Fast for testing
+        scan_interval: Duration::from_secs(5), // 5s for testing
         disk_scan_delay: Duration::from_millis(50),
         ..Default::default()
     };

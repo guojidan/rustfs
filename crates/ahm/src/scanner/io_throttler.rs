@@ -47,7 +47,7 @@ impl Default for IOThrottlerConfig {
         Self {
             max_iops: 1000,                    // 默认最大 1000 IOPS
             base_business_priority: 95,        // 业务优先级 95%
-            min_scan_delay: 100,              // 最小 100ms 延迟
+            min_scan_delay: 5000,             // 最小 5s 延迟
             max_scan_delay: 60000,            // 最大 60s 延迟
             enable_dynamic_adjustment: true,
             adjustment_response_time: 5,       // 5秒响应时间
@@ -146,7 +146,7 @@ impl AdvancedIOThrottler {
             config: Arc::new(RwLock::new(config)),
             current_iops: Arc::new(AtomicU64::new(0)),
             business_priority: Arc::new(AtomicU8::new(95)),
-            scan_delay: Arc::new(AtomicU64::new(100)),
+            scan_delay: Arc::new(AtomicU64::new(5000)),
             allocation_strategy: Arc::new(RwLock::new(ResourceAllocationStrategy::BusinessFirst)),
             throttle_history: Arc::new(RwLock::new(Vec::new())),
             last_adjustment: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),

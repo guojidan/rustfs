@@ -17,6 +17,7 @@ pub mod remote;
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     error::Result,
@@ -37,6 +38,28 @@ pub trait LockClient: Send + Sync + std::fmt::Debug {
         match request.lock_type {
             crate::types::LockType::Exclusive => self.acquire_exclusive(request).await,
             crate::types::LockType::Shared => self.acquire_shared(request).await,
+        }
+    }
+
+    /// Acquire lock with retry mechanism
+    async fn acquire_lock_with_retry(&self, request: &LockRequest, max_retries: usize) -> Result<LockResponse> {
+        let mut retries = 0;
+        let mut _last_error = None;
+        
+        loop {
+            match self.acquire_lock(request).await {
+                Ok(response) if response.success => return Ok(response),
+                Err(e) if retries < max_retries && e.is_retryable() => {
+                    retries += 1;
+                    _last_error = Some(e);
+                    // Exponential backoff with jitter
+                    let delay = Duration::from_millis((10 * retries) as u64) + 
+                               Duration::from_millis((rand::random::<u64>() % 20) as u64);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+                Ok(response) => return Ok(response),
+            }
         }
     }
 
