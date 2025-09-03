@@ -24,11 +24,11 @@ use tracing::{debug, info, warn};
 
 use rustfs_common::data_usage::DataUsageInfo;
 
-use crate::{error::Result, Error};
 use super::{
     local_stats::StatsSummary,
-    node_scanner::{LoadLevel, ScanProgress, BucketStats},
+    node_scanner::{BucketStats, LoadLevel, ScanProgress},
 };
+use crate::{Error, error::Result};
 
 /// 节点客户端配置
 #[derive(Debug, Clone)]
@@ -149,7 +149,7 @@ pub struct ScanProgressSummary {
 }
 
 /// 节点客户端
-/// 
+///
 /// 负责与其他节点通信，获取统计数据
 pub struct NodeClient {
     /// 节点信息
@@ -178,29 +178,29 @@ impl NodeClient {
 
     /// 获取节点统计摘要
     pub async fn get_stats_summary(&self) -> Result<StatsSummary> {
-        let url = format!("http://{}:{}/internal/scanner/stats", 
-                         self.node_info.address, self.node_info.port);
-        
+        let url = format!("http://{}:{}/internal/scanner/stats", self.node_info.address, self.node_info.port);
+
         for attempt in 1..=self.config.max_retries {
             match self.try_get_stats_summary(&url).await {
                 Ok(summary) => return Ok(summary),
                 Err(e) => {
-                    warn!("尝试 {} 获取节点 {} 统计失败: {}", 
-                          attempt, self.node_info.node_id, e);
-                    
+                    warn!("尝试 {} 获取节点 {} 统计失败: {}", attempt, self.node_info.node_id, e);
+
                     if attempt < self.config.max_retries {
                         tokio::time::sleep(self.config.retry_interval).await;
                     }
                 }
             }
         }
-        
+
         Err(Error::Other(format!("无法从节点 {} 获取统计数据", self.node_info.node_id)))
     }
 
     /// 尝试获取统计摘要
     async fn try_get_stats_summary(&self, url: &str) -> Result<StatsSummary> {
-        let response = self.http_client.get(url)
+        let response = self
+            .http_client
+            .get(url)
             .send()
             .await
             .map_err(|e| Error::Other(format!("HTTP 请求失败: {}", e)))?;
@@ -209,7 +209,8 @@ impl NodeClient {
             return Err(Error::Other(format!("HTTP 状态错误: {}", response.status())));
         }
 
-        let summary = response.json::<StatsSummary>()
+        let summary = response
+            .json::<StatsSummary>()
             .await
             .map_err(|e| Error::Serialization(format!("反序列化统计数据失败: {}", e)))?;
 
@@ -218,9 +219,8 @@ impl NodeClient {
 
     /// 检查节点健康状态
     pub async fn check_health(&self) -> bool {
-        let url = format!("http://{}:{}/internal/health", 
-                         self.node_info.address, self.node_info.port);
-        
+        let url = format!("http://{}:{}/internal/health", self.node_info.address, self.node_info.port);
+
         match self.http_client.get(&url).send().await {
             Ok(response) => response.status().is_success(),
             Err(_) => false,
@@ -257,16 +257,16 @@ pub struct DecentralizedStatsAggregatorConfig {
 impl Default for DecentralizedStatsAggregatorConfig {
     fn default() -> Self {
         Self {
-            aggregation_interval: Duration::from_secs(30),   // 30秒聚合一次
-            cache_ttl: Duration::from_secs(3),               // 3秒缓存
-            node_timeout: Duration::from_secs(5),            // 5秒节点超时
-            max_concurrent_aggregations: 10,                 // 最多同时聚合10个节点
+            aggregation_interval: Duration::from_secs(30), // 30秒聚合一次
+            cache_ttl: Duration::from_secs(3),             // 3秒缓存
+            node_timeout: Duration::from_secs(5),          // 5秒节点超时
+            max_concurrent_aggregations: 10,               // 最多同时聚合10个节点
         }
     }
 }
 
 /// 去中心化统计聚合器
-/// 
+///
 /// 实时聚合各节点的统计数据，提供全局视图
 pub struct DecentralizedStatsAggregator {
     /// 配置
@@ -297,9 +297,9 @@ impl DecentralizedStatsAggregator {
     pub async fn add_node(&self, node_info: NodeInfo) {
         let client_config = NodeClientConfig::default();
         let client = Arc::new(NodeClient::new(node_info.clone(), client_config));
-        
+
         self.node_clients.write().await.insert(node_info.node_id.clone(), client);
-        
+
         info!("添加节点到聚合器: {}", node_info.node_id);
     }
 
@@ -323,7 +323,7 @@ impl DecentralizedStatsAggregator {
         // 检查缓存是否有效
         let cache_timestamp = *self.cache_timestamp.read().await;
         let now = SystemTime::now();
-        
+
         if let Ok(elapsed) = now.duration_since(cache_timestamp) {
             if elapsed < cache_ttl {
                 if let Some(cached) = self.cached_stats.read().await.as_ref() {
@@ -347,7 +347,7 @@ impl DecentralizedStatsAggregator {
     /// 强制刷新聚合统计（忽略缓存）
     pub async fn force_refresh_aggregated_stats(&self) -> Result<AggregatedStats> {
         info!("强制刷新聚合统计数据");
-        
+
         let aggregated = self.aggregate_stats_from_all_nodes().await?;
 
         // 更新缓存
@@ -361,11 +361,11 @@ impl DecentralizedStatsAggregator {
     async fn aggregate_stats_from_all_nodes(&self) -> Result<AggregatedStats> {
         let node_clients = self.node_clients.read().await;
         let config = self.config.read().await;
-        
+
         // 并发获取所有节点的统计数据
         let mut tasks = Vec::new();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_aggregations));
-        
+
         // 添加本地节点统计
         let mut node_summaries = HashMap::new();
         if let Some(local_stats) = self.local_stats_summary.read().await.as_ref() {
@@ -377,10 +377,10 @@ impl DecentralizedStatsAggregator {
             let client = client.clone();
             let semaphore = semaphore.clone();
             let node_id = node_id.clone();
-            
+
             let task = tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                
+
                 match client.get_stats_summary().await {
                     Ok(summary) => {
                         debug!("成功获取节点 {} 统计数据", node_id);
@@ -392,7 +392,7 @@ impl DecentralizedStatsAggregator {
                     }
                 }
             });
-            
+
             tasks.push(task);
         }
 
@@ -409,8 +409,7 @@ impl DecentralizedStatsAggregator {
         // 聚合统计数据
         let aggregated = self.aggregate_node_summaries(node_summaries).await;
 
-        info!("聚合统计完成：{} 个节点，{} 个在线", 
-              aggregated.node_count, aggregated.online_node_count);
+        info!("聚合统计完成：{} 个节点，{} 个在线", aggregated.node_count, aggregated.online_node_count);
 
         Ok(aggregated)
     }
@@ -437,30 +436,24 @@ impl DecentralizedStatsAggregator {
             aggregated.total_buckets += summary.total_buckets;
 
             // 聚合扫描进度
-            aggregated.scan_progress_summary.node_progress.insert(
-                node_id.clone(),
-                summary.scan_progress.clone(),
-            );
+            aggregated
+                .scan_progress_summary
+                .node_progress
+                .insert(node_id.clone(), summary.scan_progress.clone());
 
-            aggregated.scan_progress_summary.total_completed_disks += 
-                summary.scan_progress.completed_disks.len();
-            aggregated.scan_progress_summary.total_completed_buckets += 
-                summary.scan_progress.completed_buckets.len();
+            aggregated.scan_progress_summary.total_completed_disks += summary.scan_progress.completed_disks.len();
+            aggregated.scan_progress_summary.total_completed_buckets += summary.scan_progress.completed_buckets.len();
         }
 
         // 计算平均扫描周期
         if !node_summaries.is_empty() {
-            let total_cycles: u64 = node_summaries.values()
-                .map(|s| s.scan_progress.current_cycle)
-                .sum();
-            aggregated.scan_progress_summary.average_current_cycle = 
-                total_cycles as f64 / node_summaries.len() as f64;
+            let total_cycles: u64 = node_summaries.values().map(|s| s.scan_progress.current_cycle).sum();
+            aggregated.scan_progress_summary.average_current_cycle = total_cycles as f64 / node_summaries.len() as f64;
         }
 
         // 找到最早的扫描开始时间
-        aggregated.scan_progress_summary.earliest_scan_start = node_summaries.values()
-            .map(|s| s.scan_progress.scan_start_time)
-            .min();
+        aggregated.scan_progress_summary.earliest_scan_start =
+            node_summaries.values().map(|s| s.scan_progress.scan_start_time).min();
 
         // TODO: 聚合存储桶统计和数据使用情况
         // 这里需要根据具体的 BucketStats 和 DataUsageInfo 结构来实现
@@ -475,16 +468,16 @@ impl DecentralizedStatsAggregator {
 
         // 并发检查所有节点健康状态
         let mut tasks = Vec::new();
-        
+
         for (node_id, client) in node_clients.iter() {
             let client = client.clone();
             let node_id = node_id.clone();
-            
+
             let task = tokio::spawn(async move {
                 let is_healthy = client.check_health().await;
                 (node_id, is_healthy)
             });
-            
+
             tasks.push(task);
         }
 
@@ -501,11 +494,10 @@ impl DecentralizedStatsAggregator {
     /// 获取在线节点列表
     pub async fn get_online_nodes(&self) -> Vec<String> {
         let health_status = self.get_nodes_health().await;
-        
-        health_status.into_iter()
-            .filter_map(|(node_id, is_healthy)| {
-                if is_healthy { Some(node_id) } else { None }
-            })
+
+        health_status
+            .into_iter()
+            .filter_map(|(node_id, is_healthy)| if is_healthy { Some(node_id) } else { None })
             .collect()
     }
 

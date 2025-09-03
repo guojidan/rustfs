@@ -5,7 +5,7 @@
 
 set -e
 
-WORKSPACE_ROOT="/home/dandan/code/rust/rustfs"
+WORKSPACE_ROOT="/Users/dandan/code/rust/rustfs_op_scanner"
 cd "$WORKSPACE_ROOT"
 
 # 基本参数

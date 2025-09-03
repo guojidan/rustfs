@@ -960,7 +960,7 @@ pub async fn apply_expiry_on_non_transitioned_objects(
             oi.clone()
         }
     };
-    
+
     if dobj.name.is_empty() {
         dobj = oi.clone();
     }

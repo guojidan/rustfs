@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+networks:
+  rustfs-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.2.0/24
+          gateway: 10.89.2.1
+
 services:
   node0:
     image: rustfs/rustfs:latest # Replace with your image name and label
@@ -23,12 +31,27 @@ services:
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_ACCESS_KEY=rustfsadmin
       - RUSTFS_SECRET_KEY=rustfsadmin
-    platform: linux/amd64
+      - RUST_LOG=warn
+      - no_proxy=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+      - NO_PROXY=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+    # platform: linux/amd64  # Commented out for podman compatibility
     ports:
-      - "9000:9000" # Map port 9001 of the host to port 9000 of the container
+      - "9000:9000" # Map port 9000 of the host to port 9000 of the container
     volumes:
-      - ../../target/x86_64-unknown-linux-gnu/release/rustfs:/app/rustfs
+      - ../../target/x86_64-unknown-linux-musl/release/rustfs:/app/rustfs
+      - ./data/node0/disk1:/data/rustfs0
+      - ./data/node0/disk2:/data/rustfs1
+      - ./data/node0/disk3:/data/rustfs2
+      - ./data/node0/disk4:/data/rustfs3
     command: "/app/rustfs"
+    extra_hosts:
+      - "node0:10.89.2.2"
+      - "node1:10.89.2.3"
+      - "node2:10.89.2.4"
+      - "node3:10.89.2.5"
+    networks:
+      rustfs-cluster:
+        ipv4_address: 10.89.2.2
 
   node1:
     image: rustfs/rustfs:latest
@@ -40,12 +63,27 @@ services:
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_ACCESS_KEY=rustfsadmin
       - RUSTFS_SECRET_KEY=rustfsadmin
-    platform: linux/amd64
+      - RUST_LOG=warn
+      - no_proxy=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+      - NO_PROXY=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+    # platform: linux/amd64  # Commented out for podman compatibility
     ports:
-      - "9001:9000" # Map port 9002 of the host to port 9000 of the container
+      - "9001:9000" # Map port 9001 of the host to port 9000 of the container
     volumes:
-      - ../../target/x86_64-unknown-linux-gnu/release/rustfs:/app/rustfs
+      - ../../target/x86_64-unknown-linux-musl/release/rustfs:/app/rustfs
+      - ./data/node1/disk1:/data/rustfs0
+      - ./data/node1/disk2:/data/rustfs1
+      - ./data/node1/disk3:/data/rustfs2
+      - ./data/node1/disk4:/data/rustfs3
     command: "/app/rustfs"
+    extra_hosts:
+      - "node0:10.89.2.2"
+      - "node1:10.89.2.3"
+      - "node2:10.89.2.4"
+      - "node3:10.89.2.5"
+    networks:
+      rustfs-cluster:
+        ipv4_address: 10.89.2.3
 
   node2:
     image: rustfs/rustfs:latest
@@ -57,12 +95,27 @@ services:
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_ACCESS_KEY=rustfsadmin
       - RUSTFS_SECRET_KEY=rustfsadmin
-    platform: linux/amd64
+      - RUST_LOG=warn
+      - no_proxy=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+      - NO_PROXY=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+    # platform: linux/amd64  # Commented out for podman compatibility
     ports:
-      - "9002:9000" # Map port 9003 of the host to port 9000 of the container
+      - "9002:9000" # Map port 9002 of the host to port 9000 of the container
     volumes:
-      - ../../target/x86_64-unknown-linux-gnu/release/rustfs:/app/rustfs
+      - ../../target/x86_64-unknown-linux-musl/release/rustfs:/app/rustfs
+      - ./data/node2/disk1:/data/rustfs0
+      - ./data/node2/disk2:/data/rustfs1
+      - ./data/node2/disk3:/data/rustfs2
+      - ./data/node2/disk4:/data/rustfs3
     command: "/app/rustfs"
+    extra_hosts:
+      - "node0:10.89.2.2"
+      - "node1:10.89.2.3"
+      - "node2:10.89.2.4"
+      - "node3:10.89.2.5"
+    networks:
+      rustfs-cluster:
+        ipv4_address: 10.89.2.4
 
   node3:
     image: rustfs/rustfs:latest
@@ -74,9 +127,24 @@ services:
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_ACCESS_KEY=rustfsadmin
       - RUSTFS_SECRET_KEY=rustfsadmin
-    platform: linux/amd64
+      - RUST_LOG=warn
+      - no_proxy=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+      - NO_PROXY=node0,node1,node2,node3,localhost,127.0.0.1,10.89.2.0/24
+    # platform: linux/amd64  # Commented out for podman compatibility
     ports:
-      - "9003:9000" # Map port 9004 of the host to port 9000 of the container
+      - "9003:9000" # Map port 9003 of the host to port 9000 of the container
     volumes:
-      - ../../target/x86_64-unknown-linux-gnu/release/rustfs:/app/rustfs
+      - ../../target/x86_64-unknown-linux-musl/release/rustfs:/app/rustfs
+      - ./data/node3/disk1:/data/rustfs0
+      - ./data/node3/disk2:/data/rustfs1
+      - ./data/node3/disk3:/data/rustfs2
+      - ./data/node3/disk4:/data/rustfs3
     command: "/app/rustfs"
+    extra_hosts:
+      - "node0:10.89.2.2"
+      - "node1:10.89.2.3"
+      - "node2:10.89.2.4"
+      - "node3:10.89.2.5"
+    networks:
+      rustfs-cluster:
+        ipv4_address: 10.89.2.5

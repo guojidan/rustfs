@@ -1,4 +1,5 @@
 /target
+/.docker/compose/data/*
 .DS_Store
 .idea
 .vscode

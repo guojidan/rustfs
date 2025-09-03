@@ -16,14 +16,14 @@ use std::{sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 use rustfs_ahm::scanner::{
-    node_scanner::{LoadLevel, NodeScanner, NodeScannerConfig},
-    stats_aggregator::{DecentralizedStatsAggregator, DecentralizedStatsAggregatorConfig, NodeInfo},
     io_throttler::MetricsSnapshot,
     local_stats::StatsSummary,
+    node_scanner::{LoadLevel, NodeScanner, NodeScannerConfig},
+    stats_aggregator::{DecentralizedStatsAggregator, DecentralizedStatsAggregatorConfig, NodeInfo},
 };
 
 mod scanner_optimization_tests;
-use scanner_optimization_tests::{create_test_scanner, PerformanceBenchmark};
+use scanner_optimization_tests::{PerformanceBenchmark, create_test_scanner};
 
 #[tokio::test]
 async fn test_end_to_end_scanner_lifecycle() {
@@ -31,20 +31,14 @@ async fn test_end_to_end_scanner_lifecycle() {
     let scanner = create_test_scanner(&temp_dir).await;
 
     // 初始化统计
-    scanner
-        .initialize_stats()
-        .await
-        .expect("Failed to initialize stats");
+    scanner.initialize_stats().await.expect("Failed to initialize stats");
 
     // 获取初始状态
     let initial_progress = scanner.get_scan_progress().await;
     assert_eq!(initial_progress.current_cycle, 0);
 
     // 强制保存检查点
-    scanner
-        .force_save_checkpoint()
-        .await
-        .expect("Failed to save checkpoint");
+    scanner.force_save_checkpoint().await.expect("Failed to save checkpoint");
 
     // 验证检查点信息
     let checkpoint_info = scanner.get_checkpoint_info().await.unwrap();
@@ -64,7 +58,7 @@ async fn test_load_balancing_and_throttling_integration() {
 
     // 模拟负载变化场景
     let load_scenarios = vec![
-        (LoadLevel::Low, 10, 100, 0, 5),      // (负载级别, 延迟, QPS, 错误率, 连接数)
+        (LoadLevel::Low, 10, 100, 0, 5), // (负载级别, 延迟, QPS, 错误率, 连接数)
         (LoadLevel::Medium, 30, 300, 10, 20),
         (LoadLevel::High, 80, 800, 50, 50),
         (LoadLevel::Critical, 200, 1200, 100, 100),
@@ -72,9 +66,7 @@ async fn test_load_balancing_and_throttling_integration() {
 
     for (expected_level, latency, qps, error_rate, connections) in load_scenarios {
         // 更新业务指标
-        scanner
-            .update_business_metrics(latency, qps, error_rate, connections)
-            .await;
+        scanner.update_business_metrics(latency, qps, error_rate, connections).await;
 
         // 等待监控系统响应
         tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -90,9 +82,7 @@ async fn test_load_balancing_and_throttling_integration() {
             memory_usage: 40,
         };
 
-        let decision = throttler
-            .make_throttle_decision(current_level, Some(metrics_snapshot))
-            .await;
+        let decision = throttler.make_throttle_decision(current_level, Some(metrics_snapshot)).await;
 
         println!(
             "Load scenario test: Expected={:?}, Actual={:?}, Should_pause={}, Delay={:?}",
@@ -115,7 +105,7 @@ async fn test_load_balancing_and_throttling_integration() {
 #[tokio::test]
 async fn test_checkpoint_resume_functionality() {
     let temp_dir = TempDir::new().unwrap();
-    
+
     // 创建第一个扫描器实例
     let scanner1 = {
         let config = NodeScannerConfig {
@@ -127,9 +117,11 @@ async fn test_checkpoint_resume_functionality() {
 
     // 初始化并模拟一些扫描进度
     scanner1.initialize_stats().await.unwrap();
-    
+
     // 模拟扫描进度
-    scanner1.update_scan_progress_for_test(3, 1, Some("checkpoint-test-key".to_string())).await;
+    scanner1
+        .update_scan_progress_for_test(3, 1, Some("checkpoint-test-key".to_string()))
+        .await;
 
     // 保存检查点
     scanner1.force_save_checkpoint().await.unwrap();
@@ -153,10 +145,7 @@ async fn test_checkpoint_resume_functionality() {
     let recovered_progress = scanner2.get_scan_progress().await;
     assert_eq!(recovered_progress.current_cycle, 3);
     assert_eq!(recovered_progress.current_disk_index, 1);
-    assert_eq!(
-        recovered_progress.last_scan_key,
-        Some("checkpoint-test-key".to_string())
-    );
+    assert_eq!(recovered_progress.last_scan_key, Some("checkpoint-test-key".to_string()));
 
     // 清理
     scanner2.cleanup_checkpoint().await.unwrap();
@@ -256,9 +245,7 @@ async fn test_performance_impact_measurement() {
     let baseline_duration = baseline_start.elapsed();
 
     // 模拟扫描器活动
-    scanner
-        .update_business_metrics(50, 500, 0, 25)
-        .await;
+    scanner.update_business_metrics(50, 500, 0, 25).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -305,9 +292,7 @@ async fn test_concurrent_scanner_operations() {
             let scanner = scanner.clone();
             tokio::spawn(async move {
                 for i in 0..10 {
-                    scanner
-                        .update_business_metrics(10 + i * 5, 100 + i * 10, i, 5 + i)
-                        .await;
+                    scanner.update_business_metrics(10 + i * 5, 100 + i * 10, i, 5 + i).await;
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             })
@@ -358,7 +343,7 @@ async fn simulate_business_workload(operations: usize) {
     for _i in 0..operations {
         // 模拟一些计算密集型操作
         let _result: u64 = (0..100).map(|x| x * x).sum();
-        
+
         // 小延迟模拟 IO 操作
         if _i % 100 == 0 {
             tokio::task::yield_now().await;

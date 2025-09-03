@@ -25,6 +25,9 @@ pub mod client;
 // Local Layer Modules
 pub mod local;
 
+// High Performance Modules
+pub mod high_perf;
+
 // Core Modules
 pub mod error;
 pub mod guard;
@@ -44,6 +47,8 @@ pub use crate::{
     // Error types
     error::{LockError, Result},
     guard::LockGuard,
+    // High performance types
+    high_perf::{HighPerfLock, HighPerfNamespaceLock},
     local::LocalLockMap,
     // Main components
     namespace::{NamespaceLock, NamespaceLockManager},
@@ -91,4 +96,14 @@ pub fn create_namespace_lock(namespace: String, _distributed: bool) -> Namespace
     // The distributed behavior is now determined by the type of clients added to the NamespaceLock
     // This function just creates an empty NamespaceLock
     NamespaceLock::new(namespace)
+}
+
+/// Create a new high-performance namespace lock
+pub fn create_high_perf_namespace_lock(namespace: String) -> NamespaceLock {
+    NamespaceLock::new(namespace)
+}
+
+/// Create a new high-performance namespace lock with remote backup
+pub fn create_high_perf_namespace_lock_with_backup(namespace: String, remote_clients: Vec<Arc<dyn LockClient>>) -> NamespaceLock {
+    NamespaceLock::with_clients(namespace, remote_clients)
 }

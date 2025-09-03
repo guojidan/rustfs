@@ -175,7 +175,12 @@ impl LocalLockMap {
     }
 
     /// write lock with TTL and exponential backoff, support timeout, use LockRequest
-    async fn lock_with_ttl_id_and_backoff(&self, request: &LockRequest, retries: usize, backoff: Duration) -> std::io::Result<bool> {
+    async fn lock_with_ttl_id_and_backoff(
+        &self,
+        request: &LockRequest,
+        retries: usize,
+        backoff: Duration,
+    ) -> std::io::Result<bool> {
         let start = Instant::now();
 
         loop {
@@ -220,7 +225,12 @@ impl LocalLockMap {
                     entry_guard.writer = Some(request.owner.clone());
                     let expires_at = Instant::now() + request.ttl;
                     entry_guard.expires_at = Some(expires_at);
-                    tracing::debug!("Write lock acquired for resource '{}' by owner '{}' (retries: {})", request.resource, request.owner, retries);
+                    tracing::debug!(
+                        "Write lock acquired for resource '{}' by owner '{}' (retries: {})",
+                        request.resource,
+                        request.owner,
+                        retries
+                    );
                     {
                         drop(entry_guard);
                         self.schedule_expiry(request.lock_id.clone(), expires_at).await;
@@ -242,7 +252,7 @@ impl LocalLockMap {
                     let mut eg = entry.write().await;
                     eg.writer_pending = eg.writer_pending.saturating_sub(1);
                 }
-                
+
                 // Apply exponential backoff if we have retries left
                 if retries < 3 {
                     let next_backoff = std::cmp::min(backoff * 2, Duration::from_millis(100));
@@ -250,7 +260,7 @@ impl LocalLockMap {
                     // Use a boxed future to avoid infinite recursion
                     return Box::pin(self.lock_with_ttl_id_and_backoff(request, retries + 1, next_backoff)).await;
                 }
-                
+
                 return Ok(false);
             }
             let remaining = request.acquire_timeout - elapsed;
@@ -262,7 +272,7 @@ impl LocalLockMap {
                     let mut eg = entry.write().await;
                     eg.writer_pending = eg.writer_pending.saturating_sub(1);
                 }
-                
+
                 // Apply exponential backoff if we have retries left
                 if retries < 3 {
                     let next_backoff = std::cmp::min(backoff * 2, Duration::from_millis(100));
@@ -270,7 +280,7 @@ impl LocalLockMap {
                     // Use a boxed future to avoid infinite recursion
                     return Box::pin(self.lock_with_ttl_id_and_backoff(request, retries + 1, next_backoff)).await;
                 }
-                
+
                 return Ok(false);
             }
             // woke up; decrement pending before retrying
@@ -289,7 +299,12 @@ impl LocalLockMap {
     }
 
     /// read lock with TTL and exponential backoff, support timeout, use LockRequest
-    async fn rlock_with_ttl_id_and_backoff(&self, request: &LockRequest, retries: usize, backoff: Duration) -> std::io::Result<bool> {
+    async fn rlock_with_ttl_id_and_backoff(
+        &self,
+        request: &LockRequest,
+        retries: usize,
+        backoff: Duration,
+    ) -> std::io::Result<bool> {
         let start = Instant::now();
 
         loop {
@@ -333,7 +348,12 @@ impl LocalLockMap {
                     *entry_guard.readers.entry(request.owner.clone()).or_insert(0) += 1;
                     let expires_at = Instant::now() + request.ttl;
                     entry_guard.expires_at = Some(expires_at);
-                    tracing::debug!("Read lock acquired for resource '{}' by owner '{}' (retries: {})", request.resource, request.owner, retries);
+                    tracing::debug!(
+                        "Read lock acquired for resource '{}' by owner '{}' (retries: {})",
+                        request.resource,
+                        request.owner,
+                        retries
+                    );
                     {
                         drop(entry_guard);
                         self.schedule_expiry(request.lock_id.clone(), expires_at).await;
@@ -359,7 +379,7 @@ impl LocalLockMap {
                     // Use a boxed future to avoid infinite recursion
                     return Box::pin(self.rlock_with_ttl_id_and_backoff(request, retries + 1, next_backoff)).await;
                 }
-                
+
                 return Ok(false);
             }
             let remaining = request.acquire_timeout - elapsed;
@@ -371,7 +391,7 @@ impl LocalLockMap {
                     // Use a boxed future to avoid infinite recursion
                     return Box::pin(self.rlock_with_ttl_id_and_backoff(request, retries + 1, next_backoff)).await;
                 }
-                
+
                 return Ok(false);
             }
         }

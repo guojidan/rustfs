@@ -53,14 +53,14 @@ impl ScannerItem {
         // If meta is empty (which happens in our test scan), create a minimal ObjectInfo
         if meta.xl_meta().is_err() {
             info!("Creating minimal ObjectInfo for object: {}", object);
-            
+
             // Create a minimal ObjectInfo based on the object name and bucket
             let obj_info = ObjectInfo {
                 bucket: self.bucket.clone(),
                 name: object.to_string(),
                 version_id: None,
                 mod_time: Some(OffsetDateTime::now_utc()), // Use current time for testing
-                size: 0, // Size doesn't matter for expiration check
+                size: 0,                                   // Size doesn't matter for expiration check
                 user_defined: HashMap::new(),
                 ..Default::default()
             };

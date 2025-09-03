@@ -165,13 +165,8 @@ impl Sets {
 
             let lock_clients = create_unique_clients(&set_endpoints).await?;
 
-            // Bind lock quorum to EC write quorum for this set: data_shards (+1 if equal to parity) per default_write_quorum()
-            let mut write_quorum = set_drive_count - parity_count;
-            if write_quorum == parity_count {
-                write_quorum += 1;
-            }
-            let namespace_lock =
-                rustfs_lock::NamespaceLock::with_clients_and_quorum(format!("set-{i}"), lock_clients, write_quorum);
+            // Use high-performance lock system for better performance
+            let namespace_lock = rustfs_lock::create_high_perf_namespace_lock_with_backup(format!("set-{i}"), lock_clients);
 
             let set_disks = SetDisks::new(
                 Arc::new(namespace_lock),

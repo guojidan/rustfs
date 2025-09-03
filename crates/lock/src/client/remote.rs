@@ -20,13 +20,15 @@ use rustfs_protos::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Mutex};
-use tonic::{Request, service::interceptor::InterceptedService, Status};
-use tracing::{info, warn};
+use tokio::sync::{Mutex, RwLock};
 use tonic::transport::Channel;
+use tonic::{Request, Status, service::interceptor::InterceptedService};
+use tracing::{info, warn};
 
 // Type alias for the intercepted gRPC client
-type InterceptedNodeServiceClient = NodeServiceClient<InterceptedService<Channel, Box<dyn Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Send + Sync + 'static>>>;
+type InterceptedNodeServiceClient = NodeServiceClient<
+    InterceptedService<Channel, Box<dyn Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Send + Sync + 'static>>,
+>;
 
 use crate::{
     cache::LockCache,
@@ -101,7 +103,7 @@ impl RemoteClient {
         Self {
             addr: endpoint.clone(),
             client_pool: Arc::new(ClientPool::new(endpoint, 10)), // Pool of 10 connections
-            cache: Arc::new(LockCache::default()),
+            cache: Arc::new(LockCache::with_default_ttl()),
             active_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -110,7 +112,7 @@ impl RemoteClient {
         Self {
             addr: url.to_string(),
             client_pool: Arc::new(ClientPool::new(url.to_string(), 10)), // Pool of 10 connections
-            cache: Arc::new(LockCache::default()),
+            cache: Arc::new(LockCache::with_default_ttl()),
             active_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -137,10 +139,10 @@ impl RemoteClient {
         if let Some(cached_info) = self.cache.get(&cache_key) {
             return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
         }
-        
+
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.acquire_exclusive_internal(request).await {
                 Ok(response) => {
@@ -151,13 +153,13 @@ impl RemoteClient {
                         }
                     }
                     return Ok(response);
-                },
+                }
                 Err(e) if retries < max_retries && e.is_retryable() => {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -174,7 +176,7 @@ impl RemoteClient {
                 .map_err(|e| LockError::internal(format!("Failed to serialize request: {e}")))?,
         });
         let result = client.lock(req).await;
-        
+
         // Return client to pool regardless of result
         self.client_pool.return_client(client).await;
 
@@ -223,10 +225,10 @@ impl RemoteClient {
         if let Some(cached_info) = self.cache.get(&cache_key) {
             return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
         }
-        
+
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.acquire_shared_internal(request).await {
                 Ok(response) => {
@@ -237,13 +239,13 @@ impl RemoteClient {
                         }
                     }
                     return Ok(response);
-                },
+                }
                 Err(e) if retries < max_retries && e.is_retryable() => {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -260,7 +262,7 @@ impl RemoteClient {
                 .map_err(|e| LockError::internal(format!("Failed to serialize request: {e}")))?,
         });
         let result = client.r_lock(req).await;
-        
+
         // Return client to pool regardless of result
         self.client_pool.return_client(client).await;
 
@@ -301,7 +303,7 @@ impl RemoteClient {
             ))
         }
     }
-    
+
     /// Release lock with retry mechanism
     async fn release_with_retry(&self, lock_id: &LockId, max_retries: usize) -> Result<bool> {
         // Remove from cache
@@ -309,10 +311,10 @@ impl RemoteClient {
         let cache_key_shared = format!("shared:{}:{}", self.addr, lock_id.resource);
         self.cache.remove(&cache_key_exclusive);
         self.cache.remove(&cache_key_shared);
-        
+
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.release_internal(lock_id).await {
                 Ok(result) => return Ok(result),
@@ -320,8 +322,8 @@ impl RemoteClient {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -359,10 +361,10 @@ impl RemoteClient {
             let mut client = self.client_pool.get_client().await?;
             let req = Request::new(GenerallyLockRequest { args: request_string });
             let result = client.r_un_lock(req).await;
-            
+
             // Return client to pool
             self.client_pool.return_client(client).await;
-            
+
             let resp = result.map_err(|e| LockError::internal(e.to_string()))?.into_inner();
             if let Some(error_info) = resp.error_info {
                 return Err(LockError::internal(error_info));
@@ -390,7 +392,7 @@ impl RemoteClient {
     async fn refresh_with_retry(&self, lock_id: &LockId, max_retries: usize) -> Result<bool> {
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.refresh_internal(lock_id).await {
                 Ok(result) => {
@@ -398,7 +400,7 @@ impl RemoteClient {
                     if result {
                         let cache_key_exclusive = format!("exclusive:{}:{}", self.addr, lock_id.resource);
                         let cache_key_shared = format!("shared:{}:{}", self.addr, lock_id.resource);
-                        
+
                         if let Some(mut lock_info) = self.cache.get(&cache_key_exclusive) {
                             lock_info.last_refreshed = std::time::SystemTime::now();
                             self.cache.put(cache_key_exclusive, lock_info);
@@ -408,13 +410,13 @@ impl RemoteClient {
                         }
                     }
                     return Ok(result);
-                },
+                }
                 Err(e) if retries < max_retries && e.is_retryable() => {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -432,12 +434,12 @@ impl RemoteClient {
                 .map_err(|e| LockError::internal(format!("Failed to serialize request: {e}")))?,
         });
         let result = client.refresh(req).await;
-        
+
         // Return client to pool
         self.client_pool.return_client(client).await;
-        
+
         let resp = result.map_err(|e| LockError::internal(e.to_string()))?.into_inner();
-        
+
         if let Some(error_info) = resp.error_info {
             return Err(LockError::internal(error_info));
         }
@@ -451,10 +453,10 @@ impl RemoteClient {
         let cache_key_shared = format!("shared:{}:{}", self.addr, lock_id.resource);
         self.cache.remove(&cache_key_exclusive);
         self.cache.remove(&cache_key_shared);
-        
+
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.force_release_internal(lock_id).await {
                 Ok(result) => return Ok(result),
@@ -462,8 +464,8 @@ impl RemoteClient {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -481,12 +483,12 @@ impl RemoteClient {
                 .map_err(|e| LockError::internal(format!("Failed to serialize request: {e}")))?,
         });
         let result = client.force_un_lock(req).await;
-        
+
         // Return client to pool
         self.client_pool.return_client(client).await;
-        
+
         let resp = result.map_err(|e| LockError::internal(e.to_string()))?.into_inner();
-        
+
         if let Some(error_info) = resp.error_info {
             return Err(LockError::internal(error_info));
         }
@@ -497,7 +499,7 @@ impl RemoteClient {
     async fn check_status_with_retry(&self, lock_id: &LockId, max_retries: usize) -> Result<Option<LockInfo>> {
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.check_status_internal(lock_id).await {
                 Ok(result) => return Ok(result),
@@ -505,8 +507,8 @@ impl RemoteClient {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -547,7 +549,7 @@ impl RemoteClient {
                             .map_err(|e| LockError::internal(format!("Failed to serialize request: {e}")))?,
                     });
                     let _ = client.un_lock(release_req).await; // Best effort release
-                    
+
                     // Return client to pool
                     self.client_pool.return_client(client).await;
 
@@ -595,7 +597,7 @@ impl RemoteClient {
     async fn get_stats_with_retry(&self, max_retries: usize) -> Result<LockStats> {
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.get_stats_internal().await {
                 Ok(result) => return Ok(result),
@@ -603,8 +605,8 @@ impl RemoteClient {
                     retries += 1;
                     _last_error = Some(e);
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -636,7 +638,7 @@ impl RemoteClient {
     async fn is_online_with_retry(&self, max_retries: usize) -> bool {
         let mut retries = 0;
         let mut _last_error = None;
-        
+
         loop {
             match self.is_online_internal().await {
                 Ok(result) => return result,
@@ -644,8 +646,8 @@ impl RemoteClient {
                     retries += 1;
                     _last_error = Some(());
                     // Exponential backoff with jitter
-                    let delay = Duration::from_millis((20 * retries) as u64) + 
-                               Duration::from_millis((rand::random::<u64>() % 50) as u64);
+                    let delay =
+                        Duration::from_millis((20 * retries) as u64) + Duration::from_millis((rand::random::<u64>() % 50) as u64);
                     tokio::time::sleep(delay).await;
                 }
                 Err(_) => return false,
@@ -656,19 +658,22 @@ impl RemoteClient {
     /// Internal method to check if remote service is online
     async fn is_online_internal(&self) -> Result<bool> {
         // Use Ping interface to test if remote service is online
-        let mut client = self.client_pool.get_client().await
+        let mut client = self
+            .client_pool
+            .get_client()
+            .await
             .map_err(|e| LockError::internal(format!("Failed to get client: {e}")))?;
-        
+
         let ping_req = Request::new(PingRequest {
             version: 1,
             body: bytes::Bytes::new(),
         });
 
         let result = client.ping(ping_req).await;
-        
+
         // Return client to pool
         self.client_pool.return_client(client).await;
-        
+
         match result {
             Ok(_) => {
                 info!("remote client {} is online", self.addr);
@@ -716,10 +721,10 @@ impl LockClient for RemoteClient {
         // Clear the connection pool
         let mut clients = self.client_pool.clients.lock().await;
         clients.clear();
-        
+
         // Clear the cache
         self.cache.clear();
-        
+
         Ok(())
     }
 

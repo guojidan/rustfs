@@ -16,9 +16,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::{
-    types::LockInfo,
-};
+use crate::types::LockInfo;
 
 /// Lock cache entry with expiration time
 #[derive(Debug, Clone)]
@@ -62,7 +60,7 @@ impl LockCache {
     }
 
     /// Create a new lock cache with default TTL of 30 seconds
-    pub fn default() -> Self {
+    pub fn with_default_ttl() -> Self {
         Self::new(Duration::from_secs(30))
     }
 
@@ -75,7 +73,7 @@ impl LockCache {
             let (iterations, sleep_duration) = (usize::MAX, Duration::from_secs(10));
             #[cfg(test)]
             let (iterations, sleep_duration) = (3, Duration::from_millis(100));
-            
+
             for _ in 0..iterations {
                 tokio::time::sleep(sleep_duration).await;
                 let now = Instant::now();
@@ -160,17 +158,17 @@ impl LockCache {
 
         // Acquire from source if not in cache
         let info = acquire_fn().await?;
-        
+
         // Cache the result
         self.put(resource_key.to_string(), info.clone());
-        
+
         Ok(info)
     }
 }
 
 impl Default for LockCache {
     fn default() -> Self {
-        Self::default()
+        Self::with_default_ttl()
     }
 }
 
@@ -244,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn test_lock_cache_get_or_acquire() {
         let cache = LockCache::new(Duration::from_secs(1));
-        
+
         let lock_id = LockId::new_deterministic("test-resource");
         let lock_info = LockInfo {
             id: lock_id.clone(),
@@ -262,9 +260,7 @@ mod tests {
 
         // First call should invoke the acquire function
         let result = cache
-            .get_or_acquire("test-resource", || async {
-                Ok(lock_info.clone())
-            })
+            .get_or_acquire("test-resource", || async { Ok(lock_info.clone()) })
             .await
             .unwrap();
         assert_eq!(result.id, lock_id);
@@ -282,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn test_lock_cache_custom_ttl() {
         let cache = LockCache::new(Duration::from_secs(10));
-        
+
         let lock_id = LockId::new_deterministic("test-resource");
         let lock_info = LockInfo {
             id: lock_id.clone(),
@@ -312,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn test_lock_cache_clear() {
         let cache = LockCache::new(Duration::from_secs(1));
-        
+
         let lock_id = LockId::new_deterministic("test-resource");
         let lock_info = LockInfo {
             id: lock_id.clone(),
@@ -330,12 +326,12 @@ mod tests {
 
         cache.put("test-resource-1".to_string(), lock_info.clone());
         cache.put("test-resource-2".to_string(), lock_info.clone());
-        
+
         assert_eq!(cache.len(), 2);
         assert!(!cache.is_empty());
 
         cache.clear();
-        
+
         assert_eq!(cache.len(), 0);
         assert!(cache.is_empty());
     }

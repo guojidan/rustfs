@@ -122,6 +122,23 @@ pub struct SetDisks {
 }
 
 impl SetDisks {
+    /// Helper function to acquire object lock with standard timeout
+    async fn acquire_object_lock(&self, object: &str, exclusive: bool) -> Result<Option<rustfs_lock::LockGuard>> {
+        let timeout = Duration::from_secs(5);
+        let ttl = Duration::from_secs(10);
+
+        if exclusive {
+            self.namespace_lock
+                .lock_guard(object, &self.locker_owner, timeout, ttl)
+                .await
+                .map_err(|e| Error::other(format!("Lock error: {}", e)))
+        } else {
+            self.namespace_lock
+                .rlock_guard(object, &self.locker_owner, timeout, ttl)
+                .await
+                .map_err(|e| Error::other(format!("Lock error: {}", e)))
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         namespace_lock: Arc<rustfs_lock::NamespaceLock>,
@@ -3273,10 +3290,7 @@ impl ObjectIO for SetDisks {
         // Acquire a shared read-lock early to protect read consistency
         let mut _read_lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .rlock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, false).await?;
 
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
@@ -3363,10 +3377,7 @@ impl ObjectIO for SetDisks {
         // Acquire per-object exclusive lock via RAII guard. It auto-releases asynchronously on drop.
         let mut _object_lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
 
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
@@ -3662,10 +3673,7 @@ impl StorageAPI for SetDisks {
         // Guard lock for source object metadata update
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(src_object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(src_object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -3768,10 +3776,7 @@ impl StorageAPI for SetDisks {
         // Guard lock for single object delete-version
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -3838,11 +3843,7 @@ impl StorageAPI for SetDisks {
         // Acquire locks for all objects first; mark errors for failures
         for (i, dobj) in objects.iter().enumerate() {
             if !_guards.contains_key(&dobj.object_name) {
-                match self
-                    .namespace_lock
-                    .lock_guard(&dobj.object_name, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                    .await?
-                {
+                match self.acquire_object_lock(&dobj.object_name, true).await? {
                     Some(g) => {
                         _guards.insert(dobj.object_name.clone(), g);
                     }
@@ -3969,10 +3970,7 @@ impl StorageAPI for SetDisks {
         // Guard lock for single object delete
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.delete_prefix {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -4158,10 +4156,7 @@ impl StorageAPI for SetDisks {
         // Acquire a shared read-lock to protect consistency during info fetch
         let mut _read_lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .rlock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, false).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -4201,10 +4196,7 @@ impl StorageAPI for SetDisks {
         // Guard lock for metadata update
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -4304,10 +4296,7 @@ impl StorageAPI for SetDisks {
         // Acquire write-lock early; hold for the whole transition operation scope
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -4433,10 +4422,7 @@ impl StorageAPI for SetDisks {
         // Acquire write-lock early for the restore operation
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -4518,10 +4504,7 @@ impl StorageAPI for SetDisks {
         // Acquire write-lock for tag update (metadata write)
         let mut _lock_guard: Option<rustfs_lock::LockGuard> = None;
         if !opts.no_lock {
-            let guard_opt = self
-                .namespace_lock
-                .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                .await?;
+            let guard_opt = self.acquire_object_lock(object, true).await?;
             if guard_opt.is_none() {
                 return Err(Error::other("can not get lock. please retry".to_string()));
             }
@@ -5172,10 +5155,7 @@ impl StorageAPI for SetDisks {
         let mut _object_lock_guard: Option<rustfs_lock::LockGuard> = None;
         if let Some(http_preconditions) = opts.http_preconditions.clone() {
             if !opts.no_lock {
-                let guard_opt = self
-                    .namespace_lock
-                    .lock_guard(object, &self.locker_owner, Duration::from_secs(5), Duration::from_secs(10))
-                    .await?;
+                let guard_opt = self.acquire_object_lock(object, true).await?;
 
                 if guard_opt.is_none() {
                     return Err(Error::other("can not get lock. please retry".to_string()));

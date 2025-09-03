@@ -34,7 +34,7 @@ impl LocalClient {
     /// Create new local client
     pub fn new() -> Self {
         Self {
-            cache: Arc::new(LockCache::default()),
+            cache: Arc::new(LockCache::with_default_ttl()),
         }
     }
 
@@ -42,7 +42,7 @@ impl LocalClient {
     pub fn get_lock_map(&self) -> Arc<LocalLockMap> {
         crate::get_global_lock_map()
     }
-    
+
     /// Get cache instance
     pub fn get_cache(&self) -> Arc<LockCache> {
         self.cache.clone()
@@ -63,7 +63,7 @@ impl LockClient for LocalClient {
         if let Some(cached_info) = self.cache.get(&cache_key) {
             return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
         }
-        
+
         let lock_map = self.get_lock_map();
         let success = lock_map
             .lock_with_ttl_id(request)
@@ -83,10 +83,10 @@ impl LockClient for LocalClient {
                 priority: request.priority,
                 wait_start_time: None,
             };
-            
+
             // Cache the lock info
             self.cache.put(cache_key, lock_info.clone());
-            
+
             Ok(LockResponse::success(lock_info, std::time::Duration::ZERO))
         } else {
             Ok(LockResponse::failure("Lock acquisition failed".to_string(), std::time::Duration::ZERO))
@@ -99,7 +99,7 @@ impl LockClient for LocalClient {
         if let Some(cached_info) = self.cache.get(&cache_key) {
             return Ok(LockResponse::success(cached_info, std::time::Duration::ZERO));
         }
-        
+
         let lock_map = self.get_lock_map();
         let success = lock_map
             .rlock_with_ttl_id(request)
@@ -119,10 +119,10 @@ impl LockClient for LocalClient {
                 priority: request.priority,
                 wait_start_time: None,
             };
-            
+
             // Cache the lock info
             self.cache.put(cache_key, lock_info.clone());
-            
+
             Ok(LockResponse::success(lock_info, std::time::Duration::ZERO))
         } else {
             Ok(LockResponse::failure("Lock acquisition failed".to_string(), std::time::Duration::ZERO))
@@ -134,7 +134,7 @@ impl LockClient for LocalClient {
         let cache = self.get_cache();
         cache.remove(&format!("exclusive:{}", lock_id.resource));
         cache.remove(&format!("shared:{}", lock_id.resource));
-        
+
         let lock_map = self.get_lock_map();
 
         // Try to release the lock directly by ID
@@ -240,7 +240,6 @@ mod tests {
     use super::*;
     use crate::types::LockType;
 
-
     #[tokio::test]
     async fn test_local_client_acquire_exclusive() {
         let client = LocalClient::new();
@@ -298,7 +297,7 @@ mod tests {
         if let Some(lock_info) = &response.lock_info {
             let result = client.release(&lock_info.id).await.unwrap();
             assert!(result);
-            
+
             // Verify we can acquire the lock again (same ID since it's deterministic)
             let cached_response = client.acquire_exclusive(&request).await.unwrap();
             assert!(cached_response.is_success());
@@ -432,36 +431,30 @@ mod tests {
     async fn test_local_client_cache_functionality() {
         let client = LocalClient::new();
         let resource_name = format!("test-cache-{}", uuid::Uuid::new_v4());
-        
+
         // Acquire lock
         let request = LockRequest::new(&resource_name, LockType::Exclusive, "test-owner")
             .with_acquire_timeout(std::time::Duration::from_secs(30));
         let response1 = client.acquire_exclusive(&request).await.unwrap();
         assert!(response1.is_success());
-        
+
         // Second acquisition should come from cache
         let response2 = client.acquire_exclusive(&request).await.unwrap();
         assert!(response2.is_success());
-        
+
         // Both responses should have the same lock ID
-        assert_eq!(
-            response1.lock_info.as_ref().unwrap().id,
-            response2.lock_info.unwrap().id
-        );
-        
+        assert_eq!(response1.lock_info.as_ref().unwrap().id, response2.lock_info.unwrap().id);
+
         // Release lock should clear cache
         if let Some(lock_info) = &response1.lock_info {
             let _ = client.release(&lock_info.id).await;
         }
-        
+
         // Third acquisition should create a new lock (but with same ID since it's deterministic)
         let response3 = client.acquire_exclusive(&request).await.unwrap();
         assert!(response3.is_success());
-        
+
         // This should be the same lock ID (deterministic based on resource)
-        assert_eq!(
-            response1.lock_info.as_ref().unwrap().id,
-            response3.lock_info.unwrap().id
-        );
+        assert_eq!(response1.lock_info.as_ref().unwrap().id, response3.lock_info.unwrap().id);
     }
 }
